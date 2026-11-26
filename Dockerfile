@@ -37,7 +37,7 @@ ENV TUBEGRAB_DOWNLOADS=/downloads \
 
 VOLUME ["/downloads"]
 EXPOSE 8765
-HEALTHCHECK --interval=1m --timeout=5s --start-period=60s \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD python -c "import urllib.request,os;urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"TUBEGRAB_PORT\"]}/api/jobs',timeout=4)"
 
 ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
