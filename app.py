@@ -3397,9 +3397,17 @@ def _to_music_single(path: Path) -> str:
     artist = meta.get("album_artist") or meta.get("artist") or _channel_of(meta)
     adir = _artist_dir(artist)
     title = meta.get("track") or _track_title(meta.get("title") or _display_title(path.name), artist)
-    name = _move_file(path, f"Music/{adir}/{SINGLES}/{_clean(title)}",
-                      {"section": "Music", "album_artist": adir, "track": title},
-                      {"title": title, "artist": artist, "albumartist": adir})
+    if meta.get("album") and meta.get("track_number"):   # was on an album: back into its slot
+        adir, folder, year = _album_folder(artist, meta["album"], meta.get("release_year"), None)
+        no = int(meta["track_number"])
+        name = _move_file(path, f"Music/{adir}/{folder}/{no:02d} - {_clean(title)}",
+                          {"section": "Music", "album_artist": adir, "track": title, "release_year": year},
+                          {"title": title, "artist": artist, "albumartist": adir, "album": meta["album"],
+                           "tracknumber": no, "date": year})
+    else:
+        name = _move_file(path, f"Music/{adir}/{SINGLES}/{_clean(title)}",
+                          {"section": "Music", "album_artist": adir, "track": title},
+                          {"title": title, "artist": artist, "albumartist": adir})
     if path.suffix.lower() in AUDIO_EXTS:
         _fetch_lyrics_bg(DOWNLOAD_DIR / name)
     return name

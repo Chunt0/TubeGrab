@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ExternalLink, Film, Image as ImageIcon, ListPlus, Music, Pencil, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, Film, Image as ImageIcon, ListPlus, Music, Pencil, Trash2, Upload } from "lucide-react";
 import { Confirm, Menu, MenuDivider, MenuItem } from "../components/ui";
 import { CoverPicker } from "../components/CoverPicker";
 import { useStore, useWatchedCount } from "../store";
@@ -53,7 +53,6 @@ function Actions({ c, onEdit, onCover, onDelete, onMove }:
             <MenuItem icon={toMusic ? Music : Film} onClick={() => { close(); onMove(); }}>
               {toMusic ? "Move to Music" : "Move to Videos"}
             </MenuItem>
-            {c.url && <MenuItem icon={ExternalLink} href={c.url} target="_blank" onClick={close}>Open on YouTube</MenuItem>}
             <MenuDivider />
             <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>{DELETE_LABEL[c.kind]}</MenuItem>
           </>

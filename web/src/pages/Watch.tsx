@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, CheckCheck, Download, ExternalLink, ListPlus, Mic2, RotateCcw, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCheck, Download, Film, ListPlus, Mic2, Music, RotateCcw, Trash2 } from "lucide-react";
 import { useStore } from "../store";
 import { Link, artistPath, collectionPath, playlistPath, useRouter, watchPath } from "../router";
 import { HttpError, api, mediaUrl, resumable, urls, type Chapter, type LibraryFile, type Segment, type WatchData } from "../api";
@@ -106,7 +106,7 @@ function Meta({ label, children }: { label: string; children: React.ReactNode })
 }
 
 export function Watch({ name }: { name: string }) {
-  const { remove, openAddToPlaylist, progress, setWatched, refresh, toast } = useStore();
+  const { remove, openAddToPlaylist, progress, setWatched, refresh, toast, move } = useStore();
   const { navigate, search } = useRouter();
   const player = usePlayer();
   const { autoplay, setAutoplay } = player;
@@ -206,10 +206,16 @@ export function Watch({ name }: { name: string }) {
                   {resumable(file) && (progress[file.name]?.watched
                     ? <MenuItem icon={RotateCcw} onClick={() => { close(); setWatched(file, false).catch(() => {}); }}>Mark as unwatched</MenuItem>
                     : <MenuItem icon={CheckCheck} onClick={() => { close(); setWatched(file, true).catch(() => {}); }}>Mark as watched</MenuItem>)}
+                  <MenuItem icon={music ? Film : Music} onClick={async () => {
+                    close();
+                    const to = await move({ name: file.name }, music ? "Videos" : "Music");
+                    if (to) navigate(watchPath(to, listId), true);
+                  }}>
+                    {music ? "Move to Videos" : "Move to Music"}
+                  </MenuItem>
                   <MenuItem icon={Download} href={mediaUrl(file.name)} download={file.name.split("/").pop()} onClick={close}>
                     Save to device
                   </MenuItem>
-                  {file.url && <MenuItem icon={ExternalLink} href={file.url} target="_blank" onClick={close}>Open on YouTube</MenuItem>}
                   <MenuDivider />
                   <MenuItem icon={Trash2} danger onClick={() => { close(); setConfirm(true); }}>Delete file…</MenuItem>
                 </>

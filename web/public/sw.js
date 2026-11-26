@@ -1,5 +1,6 @@
 // TubeGrab service worker: opens instantly and keeps thumbnails on the device.
-//  · pages: the cached app shell right away, refreshed in the background
+//  · pages: the network first, so a new build shows on the next load; the cached
+//    app shell when the server is slow (2.5 s) or out of reach
 //  · /assets/*: content-hashed, cached for good (current + previous build kept)
 //  · versioned thumbnails / covers (?v=…): cached for good, oldest dropped past a cap
 //  · /api and /media: always the network (the app caches API answers itself)
@@ -17,11 +18,11 @@ const assetsIn = (html) => new Set([...html.matchAll(/\/assets\/[^"'\s)]+/g)].ma
 
 async function shell(req) {
   const cache = await caches.open(SHELL);
-  const cached = await cache.match("/index.html");
-  const update = fetch(req).then(async (res) => {
+  const net = fetch(req).then(async (res) => {
     if (res.ok && (res.headers.get("content-type") || "").includes("text/html")) {
       const html = await res.clone().text();
-      const prev = cached ? await cached.clone().text() : "";
+      const cached = await cache.match("/index.html");
+      const prev = cached ? await cached.text() : "";
       await cache.put("/index.html", res.clone());
       // drop assets neither this build nor the previous one uses
       const keep = new Set([...assetsIn(html), ...assetsIn(prev)]);
@@ -32,7 +33,9 @@ async function shell(req) {
     }
     return res;
   }).catch(() => null);
-  return cached || (await update) || Response.error();
+  const res = await Promise.race([net, new Promise((r) => setTimeout(r, 2500, null))]);
+  if (res && res.ok) return res;
+  return (await cache.match("/index.html")) || (await net) || Response.error();
 }
 
 async function cacheFirst(name, req, max) {
