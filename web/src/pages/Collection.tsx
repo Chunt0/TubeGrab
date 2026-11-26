@@ -18,8 +18,8 @@ const DELETE_LABEL: Record<Collection["kind"], string> = {
   album: "Delete album…", singles: "Delete singles…", channel: "Delete channel…", playlist: "Delete all videos…", folder: "Delete folder…",
 };
 
-function Actions({ c, onEdit, onCover, onUpload, onDelete, onMove }:
-  { c: Collection; onEdit: () => void; onCover: () => void; onUpload: () => void; onDelete: () => void; onMove: () => void }) {
+function Actions({ c, onEdit, onCover, onDelete, onMove }:
+  { c: Collection; onEdit: () => void; onCover: () => void; onDelete: () => void; onMove: () => void }) {
   const { navigate } = useRouter();
   const { openAddToPlaylist, toast } = useStore();
   const toMusic = c.section !== "Music";
@@ -48,8 +48,7 @@ function Actions({ c, onEdit, onCover, onUpload, onDelete, onMove }:
             <MenuItem icon={ListPlus} onClick={() => { close(); addAll(); }}>
               {c.count > 1 ? "Add all to playlist…" : "Add to playlist…"}
             </MenuItem>
-            {c.count > 1 && <MenuItem icon={ImageIcon} onClick={() => { close(); onCover(); }}>Choose cover…</MenuItem>}
-            <MenuItem icon={Upload} onClick={() => { close(); onUpload(); }}>Upload picture…</MenuItem>
+            <MenuItem icon={ImageIcon} onClick={() => { close(); onCover(); }}>Change picture…</MenuItem>
             <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>Edit details…</MenuItem>
             <MenuItem icon={toMusic ? Music : Film} onClick={() => { close(); onMove(); }}>
               {toMusic ? "Move to Music" : "Move to Videos"}
@@ -128,7 +127,7 @@ export function CollectionPage({ name: key }: { name: string }) {
             <h1 className="mt-1 text-2xl font-medium leading-tight tracking-tight">{c.kind === "singles" ? "Singles" : c.title}</h1>
             {c.artist && <Link to={artistPath(c.artist)} className="mt-1 block text-[15px] text-fg/80 hover:text-white hover:underline">{c.artist}</Link>}
             {stats}
-            <div className="mt-5"><Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} onMove={onMove} /></div>
+            <div className="mt-5"><Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onDelete={() => setDeleting(true)} onMove={onMove} /></div>
           </div>
           <div className="min-w-0 md:pt-1">
             <div className="border-t border-line">
@@ -148,7 +147,7 @@ export function CollectionPage({ name: key }: { name: string }) {
               <h1 className="mt-1 text-2xl font-medium tracking-tight sm:text-3xl">{c.title}</h1>
               {stats}
             </div>
-            <Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} onMove={onMove} />
+            <Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onDelete={() => setDeleting(true)} onMove={onMove} />
           </header>
           <div className={`mt-6 ${GRID}`}>
             {items.map((f, i) => <VideoCard key={f.name} file={f} position={c.kind === "playlist" ? f.index ?? i + 1 : null} showChannel={c.kind === "playlist"} />)}

@@ -157,8 +157,7 @@ export function PlaylistPage({ id }: { id: string }) {
               {(close) => (
                 <>
                   <MenuItem icon={Pencil} onClick={() => { close(); setEditing(true); }}>Edit details…</MenuItem>
-                  {items.length > 0 && <MenuItem icon={ImageIcon} onClick={() => { close(); setPicking(true); }}>Choose cover…</MenuItem>}
-                  <MenuItem icon={Upload} onClick={() => { close(); upload.current?.click(); }}>Upload picture…</MenuItem>
+                  <MenuItem icon={ImageIcon} onClick={() => { close(); setPicking(true); }}>Change picture…</MenuItem>
                   {custom && (
                     <MenuItem icon={RotateCcw} onClick={() => { close(); updatePlaylist(p.id, { cover_item: null }).catch(fail); }}>
                       Use automatic cover

@@ -37,7 +37,7 @@ export function CoverPicker({ open, onClose, items, current, onPick, square, num
   return (
     <Modal open={open} onClose={onClose} className="max-w-3xl">
       <div className="p-5">
-        <h2 className="text-[13px] text-muted">Choose cover</h2>
+        <h2 className="text-[13px] text-muted">Change picture</h2>
         {extra && <div className="mt-4">{extra}</div>}
         {error && <p className="mt-3 text-[12px] text-bad">{error}</p>}
         <div className={cx("mt-4 grid max-h-[60dvh] gap-3 overflow-y-auto", square ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-5" : "grid-cols-2 sm:grid-cols-3")}>
