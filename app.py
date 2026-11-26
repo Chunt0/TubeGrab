@@ -228,16 +228,22 @@ def _plan(info: dict, *, audio: bool, playlist_mode: bool) -> dict:
     artist = _artist(info)
     tags: dict = {}
 
-    if audio and (album_pl or artist) and not (in_playlist and not album_pl):
+    has_album = bool(info.get("album") and artist)
+    # a regular playlist that is really one album ("The Smashing Pumpkins: Gish (Deluxe Edition)")
+    album_like = album_pl or (in_playlist and has_album and len(_fold(info["album"])) >= 3
+                              and _fold(info["album"]) in _fold(info.get("playlist_title") or ""))
+    # audio goes to Music when YouTube knows the song; a mixed playlist's songs
+    # land in their own albums (and become one of your playlists, see _run_job)
+    if audio and (album_like or artist) and (not in_playlist or album_like or has_album):
         # Music: Artist / Album (Year) / NN - Track
         artist = artist or _clean_channel(info.get("uploader") or info.get("channel"))
         album = info.get("album") or (info.get("playlist_title") if album_pl else None)
         year = _year(info)
         if not info.get("track"):   # a music video, not a YouTube Music track
             title = _track_title(title, artist)
-        track_no = info.get("playlist_index") if album_pl else info.get("track_number")
+        track_no = info.get("playlist_index") if album_like else info.get("track_number")
         if album:
-            url = info.get("playlist_webpage_url") if album_pl else None
+            url = info.get("playlist_webpage_url") if album_like else None
             adir, folder, year = _album_folder(artist, album, year, url)
         else:
             adir, folder = _artist_dir(artist), SINGLES
@@ -246,8 +252,8 @@ def _plan(info: dict, *, audio: bool, playlist_mode: bool) -> dict:
         artist = adir   # album artist = the folder's spelling, so tags agree across the album
         tags = {"artist": info.get("artist") or artist, "album_artist": artist, "album": album,
                 "track_number": track_no if album else None, "release_year": year, "track": title}
-        return {"rel": rel, "section": "Music", "tags": tags,
-                "collection_title": album, "collection_url": info.get("playlist_webpage_url") if album_pl else None}
+        return {"rel": rel, "section": "Music", "tags": tags, "mixed_playlist": in_playlist and not album_like,
+                "collection_title": album, "collection_url": info.get("playlist_webpage_url") if album_like else None}
 
     if in_playlist:
         pl = info.get("playlist_title") or "Playlist"
@@ -779,6 +785,8 @@ def _run_job(job_id: str, url: str, fmt: str, playlist: bool) -> None:
             raise RuntimeError(
                 ydl.last_error or "Nothing was downloaded — check the URL."
             )
+        if any(pl.get("mixed_playlist") for pl in ydl.plans.values()):
+            _mirror_playlist(info, _jobs[job_id].get("files", []))
         _update(
             job_id,
             status="complete",
@@ -792,6 +800,29 @@ def _run_job(job_id: str, url: str, fmt: str, playlist: bool) -> None:
         _update(job_id, status="error", error=str(exc), finished_at=_now())
     finally:
         _tidy_when_idle()
+
+
+def _mirror_playlist(info: dict, paths: list[str]) -> None:
+    """Songs from a mixed YouTube playlist were filed into their albums; keep the
+    playlist itself as one of your playlists (same name and order)."""
+    names = [_rel(Path(p)) for p in paths
+             if Path(p).is_file() and Path(p).suffix.lower() in MEDIA_EXTS]
+    refs = _pl_refs(list(dict.fromkeys(names))) or []
+    source = info.get("id") or info.get("webpage_url")
+    if not refs or not source:
+        return
+    with _meta_lock:
+        pls = _pl_all()
+        pid = next((k for k, p in pls.items() if p.get("source") == source), None)
+        if pid:   # downloaded again: add what's new, keep your order
+            p = pls[pid]
+            p["items"] = p.get("items", []) + [r for r in refs if r not in p.get("items", [])]
+        else:
+            pid = uuid.uuid4().hex[:10]
+            p = pls[pid] = {"title": (info.get("title") or "Playlist")[:120], "description": "",
+                            "items": refs, "cover": None, "created": _now(), "source": source}
+        p["updated"] = _now()
+        _write_json(PLAYLISTS_FILE, pls)
 
 
 def _tidy_when_idle() -> None:
@@ -1160,6 +1191,47 @@ def _pick_artist(names: list[str], music: Path) -> str:
     return sorted(names, key=lambda n: (n.isupper() and not all(x.isupper() for x in names), -size(n)))[0]
 
 
+def _refile_playlist_audio() -> None:
+    """Move songs an older version put in Playlists/ (because they came from a
+    regular playlist link) into Music/Artist/Album, using what YouTube said."""
+    root = DOWNLOAD_DIR / "Playlists"
+    if not root.is_dir():
+        return
+    by_path = _ids_by_path()
+    moved = 0
+    for path in sorted(root.glob("*/*")):
+        if not path.is_file() or path.suffix.lower() not in AUDIO_EXTS:
+            continue
+        vid = _video_id(path, by_path)
+        meta = _meta_for(vid)
+        if not vid or not meta.get("album") or not meta.get("playlist_id"):
+            continue
+        plan = _plan(dict(meta), audio=True, playlist_mode=True)
+        if plan["section"] != "Music":
+            continue
+        ext = path.suffix.lower()
+        rel = _unique(plan["rel"], ext, vid)
+        dest = DOWNLOAD_DIR / (rel + ext)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        old = _rel(path)
+        shutil.move(str(path), str(dest))
+        _index_move(old, _rel(dest))
+        _note_folder(Path(rel).parent.as_posix(), plan["collection_title"], plan["collection_url"])
+        _write_meta({"id": vid}, _GrabDL._meta_extra(plan))
+        t = plan["tags"]
+        _retag(dest, {"title": t.get("track"), "artist": t.get("artist"), "albumartist": t.get("album_artist"),
+                      "album": t.get("album"), "tracknumber": t.get("track_number"), "date": t.get("release_year")})
+        cover = META_DIR / f"{vid}.jpg"
+        if cover.exists():
+            _crop_square(cover)
+            _embed_cover(dest, cover)
+        _prune_empty_dirs(path.parent)
+        moved += 1
+    if moved:
+        _forget_gone_folders()
+        print(f"[tubegrab] moved {moved} song(s) from Playlists/ into Music/")
+
+
 def tidy_music() -> None:
     """Repair albums whose tracks YouTube described inconsistently:
     * artist folders that differ only in case ('MELVINS' + 'Melvins') merge;
@@ -1167,6 +1239,8 @@ def tidy_music() -> None:
       its tracks agree on;
     * tags (album artist, year) are made consistent across the album;
     * 'Artist - … (Official Video)' noise is stripped from track names."""
+    with _tidy_lock:
+        _refile_playlist_audio()
     music = DOWNLOAD_DIR / "Music"
     if not music.is_dir():
         return
