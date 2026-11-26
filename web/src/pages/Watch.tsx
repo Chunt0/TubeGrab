@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, CheckCheck, Download, ExternalLink, ListPlus, Mic2, RotateCcw, Trash2 } from "lucide-react";
 import { useStore } from "../store";
 import { Link, artistPath, collectionPath, playlistPath, useRouter, watchPath } from "../router";
-import { api, mediaUrl, playlistNeighbours, resumable, upNextFor, type Chapter, type LibraryFile, type Segment } from "../api";
+import { HttpError, api, mediaUrl, resumable, urls, type Chapter, type LibraryFile, type Segment, type WatchData } from "../api";
+import { useQuery } from "../lib/cache";
 import { usePlayer } from "../player";
 import { ago, bytes, cleanChannel, cx, duration, resLabel, uploadDate } from "../lib/format";
 import { Thumb } from "../components/Thumb";
@@ -105,27 +106,27 @@ function Meta({ label, children }: { label: string; children: React.ReactNode })
 }
 
 export function Watch({ name }: { name: string }) {
-  const { files, collections, filesLoaded, remove, playlists, openAddToPlaylist, progress, setWatched, refreshFiles, toast } = useStore();
+  const { remove, openAddToPlaylist, progress, setWatched, refresh, toast } = useStore();
   const { navigate, search } = useRouter();
   const player = usePlayer();
   const { autoplay, setAutoplay } = player;
   const [confirm, setConfirm] = useState(false);
   const [allNext, setAllNext] = useState(false);
 
-  const file = files.find((f) => f.name === name);
-  const coll = file ? collections.find((c) => c.key === file.collection) : undefined;
   // ?list=<id>: playing through one of your playlists
   const listId = new URLSearchParams(search).get("list");
-  const pl = (file && playlists.find((x) => x.id === listId && x.items.includes(file.name))) || null;
+  const { data, error } = useQuery<WatchData>(urls.watch(name, listId), { keep: true });
+  // while the next file loads, the previous page stays (so the player isn't torn down between tracks)
+  const view = data;
+  const file = view?.file;
+  const coll = view?.collection ?? undefined;
+  const pl = view?.playlist ?? null;
   const { setList } = player;
-  useEffect(() => { setList(pl ? pl.id : null); }, [pl?.id, setList]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (view) setList(pl ? pl.id : null); }, [view, pl?.id, setList]); // eslint-disable-line react-hooks/exhaustive-deps
   const music = file?.section === "Music";
-  // Queue: rest of this collection (playlist order), then everything else newest-first.
-  const { next, upNext } = useMemo(() => {
-    if (!file) return { next: null, upNext: [] as LibraryFile[] };
-    const queue = upNextFor(file, files, collections, pl);
-    return { next: queue[0] ?? null, upNext: pl ? queue : queue.slice(0, 24) };
-  }, [file, files, collections, pl]);
+  // Queue: rest of this playlist / collection, then the newest from the same section.
+  const upNext = view?.next ?? [];
+  const next = upNext[0] ?? null;
 
   const { open } = player;
   const startAt = Number(new URLSearchParams(search).get("t")) || null;   // ?t=123 (from transcript search)
@@ -150,7 +151,7 @@ export function Watch({ name }: { name: string }) {
     if (!file) return;
     try {
       const found = await api.findLyrics(file.name);
-      await refreshFiles();
+      refresh();
       toast(found ? { kind: "ok", title: "Lyrics found" } : { kind: "info", title: "No lyrics found" });
       if (found) setTab("lyrics");
     } catch (e) {
@@ -158,7 +159,7 @@ export function Watch({ name }: { name: string }) {
     }
   };
   useEffect(() => setTab("next"), [name]);
-  useEffect(() => { if (filesLoaded && !file) navigate("/", true); }, [filesLoaded, file, navigate]);
+  useEffect(() => { if (error instanceof HttpError && error.status === 404) navigate("/", true); }, [error, navigate]);
   useEffect(() => { document.title = file ? file.title : "Library"; return () => { document.title = "Library"; }; }, [file]);
   useEffect(() => { setAllNext(false); }, [name]);
 
@@ -166,7 +167,7 @@ export function Watch({ name }: { name: string }) {
 
   const doDelete = async () => {
     await remove(file);
-    navigate(next ? watchPath(next.name, pl?.id) : pl ? playlistPath(pl.id) : "/", true);
+    navigate(next ? watchPath(next.name, pl?.id) : pl ? playlistPath(pl.id) : coll ? collectionPath(coll.key) : "/", true);
   };
 
   return (
@@ -200,7 +201,7 @@ export function Watch({ name }: { name: string }) {
             <Menu className="-mr-2 -mt-1">
               {(close) => (
                 <>
-                  <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist([file.name]); }}>Add to playlist…</MenuItem>
+                  <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist([file.name], file.title); }}>Add to playlist…</MenuItem>
                   {music && <MenuItem icon={Mic2} onClick={() => { close(); findLyrics(); }}>{file.lyrics ? "Look up lyrics again" : "Find lyrics"}</MenuItem>}
                   {resumable(file) && (progress[file.name]?.watched
                     ? <MenuItem icon={RotateCcw} onClick={() => { close(); setWatched(file, false).catch(() => {}); }}>Mark as unwatched</MenuItem>
@@ -238,7 +239,7 @@ export function Watch({ name }: { name: string }) {
           <div className="flex items-center gap-4 border-b border-line">
             <div role="tablist" className="flex min-w-0 flex-1 items-center gap-4">
               {([
-                ["next", pl ? <>{pl.title} <span className="font-mono text-[11px] font-normal text-faint tabular">{playlistNeighbours(pl, file, files).position + 1}/{pl.items.length}</span></> : "Up next"],
+                ["next", pl ? <>{pl.title} <span className="font-mono text-[11px] font-normal text-faint tabular">{pl.position + 1}/{pl.total}</span></> : "Up next"],
                 ...(file.chapters ? [["chapters", "Chapters"]] : []),
                 ...(segs?.length ? [["transcript", "Transcript"]] : []),
                 ...(file.lyrics ? [["lyrics", "Lyrics"]] : []),

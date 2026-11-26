@@ -1,14 +1,15 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, X } from "lucide-react";
 import { useStore } from "../store";
-import type { Collection, LibraryFile } from "../api";
+import { urls, type Collection, type LibraryFile, type Page } from "../api";
 import { Link, artistPath, watchPath } from "../router";
 import { bytes, duration, longDuration } from "../lib/format";
 import { AlbumCard } from "../components/CollectionCard";
 import { GrabForm } from "../components/GrabForm";
 import { Thumb } from "../components/Thumb";
 import { ItemMenu } from "../components/ItemMenu";
-import { Grow } from "../lib/showMore";
+import { useQuery } from "../lib/cache";
+import { Grow } from "../lib/grow";
 
 type Sort = "recent" | "artist" | "title" | "year";
 const SORTS: { id: Sort; label: string }[] = [
@@ -44,10 +45,10 @@ export function SearchBox({ q, setQ, placeholder = "Search" }: { q: string; setQ
 }
 
 /** Compact track row used in search results and artist pages. */
-export function TrackRow({ f, n, showAlbum = true }: { f: LibraryFile; n?: number | null; showAlbum?: boolean }) {
+export function TrackRow({ f, n, showAlbum = true, list }: { f: LibraryFile; n?: number | null; showAlbum?: boolean; list?: string | null }) {
   return (
     <div className="group flex items-center border-b border-line">
-    <Link to={watchPath(f.name)} className="flex min-w-0 flex-1 items-center gap-3 py-1.5">
+    <Link to={watchPath(f.name, list)} className="flex min-w-0 flex-1 items-center gap-3 py-1.5">
       {n !== undefined
         ? <span className="w-6 shrink-0 text-right font-mono text-xs text-faint tabular">{n ?? "·"}</span>
         : <Thumb file={f} className="size-9 shrink-0 rounded-sm" />}
@@ -73,13 +74,19 @@ function sortAlbums(list: Collection[], sort: Sort) {
   return out.sort(cmp[sort]);
 }
 
+/** `value`, once it has stopped changing for `ms`. */
+export function useDebounced<T>(value: T, ms = 220): T {
+  const [v, setV] = useState(value);
+  useEffect(() => { const t = setTimeout(() => setV(value), ms); return () => clearTimeout(t); }, [value, ms]);
+  return v;
+}
+
 export function Music() {
-  const { files, collections, filesLoaded } = useStore();
+  const { library } = useStore();
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
 
-  const tracks = useMemo(() => files.filter((f) => f.section === "Music"), [files]);
-  const albums = useMemo(() => collections.filter((c) => c.section === "Music"), [collections]);
+  const albums = useMemo(() => (library?.collections ?? []).filter((c) => c.section === "Music"), [library]);
   const artists = useMemo(() => {
     const m = new Map<string, { name: string; albums: number; tracks: number }>();
     for (const c of albums) {
@@ -90,18 +97,20 @@ export function Music() {
     }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [albums]);
-  const stats = useMemo(() => ({
-    size: tracks.reduce((a, f) => a + f.size, 0),
-    time: tracks.reduce((a, f) => a + (f.duration ?? 0), 0),
-  }), [tracks]);
+  const stats = library?.stats.music;
 
   const needle = q.trim().toLowerCase();
+  const term = useDebounced(needle);
   const match = (s: string | null | undefined) => !!s && s.toLowerCase().includes(needle);
-  const shownAlbums = sortAlbums(needle ? albums.filter((c) => match(c.title) || match(c.artist)) : albums, sort);
-  const shownTracks = needle ? tracks.filter((f) => match(f.title) || match(f.artist) || match(f.album)).slice(0, 50) : [];
+  const shownAlbums = useMemo(() => sortAlbums(needle ? albums.filter((c) => match(c.title) || match(c.artist)) : albums, sort),
+    [albums, needle, sort]); // eslint-disable-line react-hooks/exhaustive-deps
+  const tracks = useQuery<Page>(term ? `${urls.files({ section: "Music", q: term, sort: "title" })}&limit=50` : null, { keep: true });
+  const shownTracks = needle ? tracks.data?.files ?? [] : [];
 
-  if (!filesLoaded) return <div className={`mt-10 ${ALBUM_GRID}`}>{Array.from({ length: 12 }, (_, i) => <div key={i} className="aspect-square rounded-sm bg-surface" />)}</div>;
-  if (!tracks.length) {
+  if (!library || (!library.ready && !albums.length)) {
+    return <div className={`mt-10 ${ALBUM_GRID}`}>{Array.from({ length: 12 }, (_, i) => <div key={i} className="aspect-square rounded-sm bg-surface" />)}</div>;
+  }
+  if (!stats?.count) {
     return (
       <section className="mx-auto mt-[16vh] max-w-xl">
         <h1 className="text-[15px] font-medium">No music yet</h1>
@@ -116,7 +125,7 @@ export function Music() {
         <div className="flex w-full items-baseline gap-3 sm:mr-auto sm:w-auto">
           <h1 className="text-[15px] font-medium">Music</h1>
           <span className="font-mono text-[11px] text-faint tabular">
-            {artists.length} artists · {tracks.length} tracks · {longDuration(stats.time)} · {bytes(stats.size)}
+            {artists.length} artists · {stats.count} tracks · {longDuration(stats.duration)} · {bytes(stats.size)}
           </span>
         </div>
         <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label="Sort"
@@ -128,7 +137,7 @@ export function Music() {
 
       {shownTracks.length > 0 && (
         <section className="mt-8">
-          <SectionHead title={`Tracks · ${shownTracks.length}`} />
+          <SectionHead title={`Tracks · ${tracks.data && tracks.data.total > shownTracks.length ? `${shownTracks.length} of ${tracks.data.total}` : shownTracks.length}`} />
           <div className="max-w-3xl">{shownTracks.map((f) => <TrackRow key={f.name} f={f} />)}</div>
         </section>
       )}
@@ -143,16 +152,16 @@ export function Music() {
       {!needle && (
         <section className="mt-12">
           <SectionHead title="Artists" />
-          <div className="grid grid-cols-1 gap-x-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {artists.map((a) => (
+          <Grow list={artists} step={120} className="grid grid-cols-1 gap-x-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {(a) => (
               <Link key={a.name} to={artistPath(a.name)} className="group flex items-baseline justify-between gap-3 border-b border-line py-2">
                 <span className="truncate text-[13px] text-fg/90 group-hover:text-white">{a.name}</span>
                 <span className="shrink-0 font-mono text-[11px] text-faint tabular">
                   {a.albums ? `${a.albums} ${a.albums === 1 ? "album" : "albums"}` : `${a.tracks} ${a.tracks === 1 ? "track" : "tracks"}`}
                 </span>
               </Link>
-            ))}
-          </div>
+            )}
+          </Grow>
         </section>
       )}
     </>

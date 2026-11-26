@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
-import { isActive, type LibraryFile } from "../api";
+import { isActive, urls, type LibraryFile } from "../api";
+import { usePaged } from "../lib/cache";
 import { useStore } from "../store";
 import { Link, watchPath } from "../router";
 import { GrabForm } from "../components/GrabForm";
@@ -20,7 +21,9 @@ function Section({ title, count, children }: { title: string; count?: number; ch
 }
 
 export function Downloads() {
-  const { jobs, files, dir, remove } = useStore();
+  const { jobs, library, remove } = useStore();
+  const files = usePaged<LibraryFile>(urls.files({ sort: "new" }), 100);
+  const dir = library?.dir;
   const [pending, setPending] = useState<LibraryFile | null>(null);
   const active = jobs.filter(isActive);
   const done = jobs.filter((j) => !isActive(j));
@@ -37,10 +40,10 @@ export function Downloads() {
         <Section title="Finished" count={done.length}>{done.map((j) => <JobCard key={j.id} job={j} />)}</Section>
       )}
 
-      <Section title="Files" count={files.length}>
-        {files.length ? (
+      <Section title="Files" count={files.total}>
+        {files.items.length ? (
           <div>
-            {files.map((f) => (
+            {files.items.map((f) => (
               <div key={f.name} className="group flex items-center gap-4 border-b border-line py-2">
                 <Link to={watchPath(f.name)} className="min-w-0 flex-1">
                   <div className="truncate text-[13px] text-fg/90 group-hover:text-white">{f.title}</div>
@@ -54,9 +57,10 @@ export function Downloads() {
                 </IconButton>
               </div>
             ))}
+            {files.sentinel}
           </div>
         ) : (
-          <p className="py-8 text-[13px] text-muted">No files.</p>
+          files.loaded && <p className="py-8 text-[13px] text-muted">No files.</p>
         )}
         {dir && <p className="mt-3 font-mono text-[11px] text-faint">{dir}</p>}
       </Section>

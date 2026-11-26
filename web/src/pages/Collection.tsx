@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ExternalLink, Image as ImageIcon, ListPlus, Pencil, Trash2, Upload } from "lucide-react";
 import { Confirm, Menu, MenuDivider, MenuItem } from "../components/ui";
 import { CoverPicker } from "../components/CoverPicker";
 import { useStore, useWatchedCount } from "../store";
 import { Link, artistPath, useRouter, watchPath } from "../router";
-import { collectionCoverUrl, collectionOrder, filesIn, type Collection, type LibraryFile } from "../api";
+import { api, collectionCoverUrl, urls, type Collection, type LibraryFile } from "../api";
 import { bytes, longDuration } from "../lib/format";
 import { VideoCard } from "../components/VideoCard";
 import { KIND_LABEL } from "../components/CollectionCard";
 import { EditCollection } from "../components/EditCollection";
 import { TrackRow } from "./Music";
-import { Grow } from "../lib/showMore";
+import { usePaged } from "../lib/cache";
 
 const GRID = "grid grid-cols-1 gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
 
@@ -18,28 +18,36 @@ const DELETE_LABEL: Record<Collection["kind"], string> = {
   album: "Delete album…", singles: "Delete singles…", channel: "Delete channel…", playlist: "Delete all videos…", folder: "Delete folder…",
 };
 
-function Actions({ items, c, onEdit, onCover, onUpload, onDelete }:
-  { items: LibraryFile[]; c: Collection; onEdit: () => void; onCover: () => void; onUpload: () => void; onDelete: () => void }) {
+function Actions({ c, onEdit, onCover, onUpload, onDelete }:
+  { c: Collection; onEdit: () => void; onCover: () => void; onUpload: () => void; onDelete: () => void }) {
   const { navigate } = useRouter();
-  const { openAddToPlaylist } = useStore();
+  const { openAddToPlaylist, toast } = useStore();
+  const shuffle = async () => {
+    const n = await api.random({ dir: c.key }).catch(() => null);
+    if (n) navigate(watchPath(n));
+  };
+  const addAll = async () => {
+    try {
+      openAddToPlaylist(await api.names(c.key), c.kind === "singles" ? `${c.artist} · Singles` : c.title);
+    } catch (e) {
+      toast({ kind: "bad", title: "Couldn't load the list", body: e instanceof Error ? e.message : String(e) });
+    }
+  };
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {items[0] && (
-        <Link to={watchPath(items[0].name)} className="flex h-8 items-center rounded-sm bg-fg px-3 text-[13px] font-medium text-ink hover:bg-white">
-          {c.kind === "channel" ? "Play latest" : "Play all"}
-        </Link>
-      )}
-      {items.length > 1 && (
-        <button onClick={() => navigate(watchPath(items[Math.floor(Math.random() * items.length)].name))}
-          className="flex h-8 items-center rounded-sm border border-line-strong px-3 text-[13px] hover:bg-white/5">Shuffle</button>
+      <Link to={watchPath(c.first)} className="flex h-8 items-center rounded-sm bg-fg px-3 text-[13px] font-medium text-ink hover:bg-white">
+        {c.kind === "channel" ? "Play latest" : "Play all"}
+      </Link>
+      {c.count > 1 && (
+        <button onClick={shuffle} className="flex h-8 items-center rounded-sm border border-line-strong px-3 text-[13px] hover:bg-white/5">Shuffle</button>
       )}
       <Menu>
         {(close) => (
           <>
-            <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist(items.map((f) => f.name)); }}>
-              {items.length > 1 ? "Add all to playlist…" : "Add to playlist…"}
+            <MenuItem icon={ListPlus} onClick={() => { close(); addAll(); }}>
+              {c.count > 1 ? "Add all to playlist…" : "Add to playlist…"}
             </MenuItem>
-            {items.length > 1 && <MenuItem icon={ImageIcon} onClick={() => { close(); onCover(); }}>Choose cover…</MenuItem>}
+            {c.count > 1 && <MenuItem icon={ImageIcon} onClick={() => { close(); onCover(); }}>Choose cover…</MenuItem>}
             <MenuItem icon={Upload} onClick={() => { close(); onUpload(); }}>Upload picture…</MenuItem>
             <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>Edit details…</MenuItem>
             {c.url && <MenuItem icon={ExternalLink} href={c.url} target="_blank" onClick={close}>Open on YouTube</MenuItem>}
@@ -53,7 +61,7 @@ function Actions({ items, c, onEdit, onCover, onUpload, onDelete }:
 }
 
 export function CollectionPage({ name: key }: { name: string }) {
-  const { files, collections, filesLoaded, setCover, uploadCollectionCover, deleteCollection, toast } = useStore();
+  const { library, setCover, uploadCollectionCover, deleteCollection, toast } = useStore();
   const upload = useRef<HTMLInputElement>(null);
   const onUpload = async (file: File | undefined) => {
     if (!file || !c) return;
@@ -68,12 +76,13 @@ export function CollectionPage({ name: key }: { name: string }) {
   const [editing, setEditing] = useState(false);
   const [picking, setPicking] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const c = collections.find((x) => x.key === key);
-  const items = useMemo(() => collectionOrder(c, filesIn(key, files)), [c, files, key]);
-  const music = c?.section === "Music";
+  const c = library?.collections.find((x) => x.key === key);
+  const music = c ? c.section === "Music" : key.startsWith("Music/");
+  // albums: every track at once (they're short); channels: as you scroll
+  const { items, sentinel } = usePaged<LibraryFile>(urls.files({ dir: key }), music ? 1000 : 60);
   const watched = useWatchedCount(key);
 
-  useEffect(() => { if (filesLoaded && !c && !editing) navigate(music ? "/music" : "/videos", true); }, [filesLoaded, c, editing, music, navigate]);
+  useEffect(() => { if (library?.ready && !c && !editing) navigate(music ? "/music" : "/videos", true); }, [library, c, editing, music, navigate]);
   useEffect(() => {
     if (c) document.title = c.artist ? `${c.title} · ${c.artist}` : c.title;
     return () => { document.title = "Library"; };
@@ -106,13 +115,14 @@ export function CollectionPage({ name: key }: { name: string }) {
             <h1 className="mt-1 text-2xl font-medium leading-tight tracking-tight">{c.kind === "singles" ? "Singles" : c.title}</h1>
             {c.artist && <Link to={artistPath(c.artist)} className="mt-1 block text-[15px] text-fg/80 hover:text-white hover:underline">{c.artist}</Link>}
             {stats}
-            <div className="mt-5"><Actions items={items} c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} /></div>
+            <div className="mt-5"><Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} /></div>
           </div>
           <div className="min-w-0 md:pt-1">
             <div className="border-t border-line">
               {items.map((f, i) => (
                 <TrackRow key={f.name} f={f} n={c.kind === "album" ? f.index ?? i + 1 : i + 1} showAlbum={false} />
               ))}
+              {!items.length && Array.from({ length: Math.min(c.count, 12) }, (_, i) => <div key={i} className="h-[45px] border-b border-line" />)}
             </div>
           </div>
         </div>
@@ -125,11 +135,12 @@ export function CollectionPage({ name: key }: { name: string }) {
               <h1 className="mt-1 text-2xl font-medium tracking-tight sm:text-3xl">{c.title}</h1>
               {stats}
             </div>
-            <Actions items={items} c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} />
+            <Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} />
           </header>
-          <Grow list={items} className={`mt-6 ${GRID}`}>
-            {(f, i) => <VideoCard key={f.name} file={f} position={c.kind === "playlist" ? f.index ?? i + 1 : null} showChannel={c.kind === "playlist"} />}
-          </Grow>
+          <div className={`mt-6 ${GRID}`}>
+            {items.map((f, i) => <VideoCard key={f.name} file={f} position={c.kind === "playlist" ? f.index ?? i + 1 : null} showChannel={c.kind === "playlist"} />)}
+          </div>
+          {sentinel}
         </>
       )}
 
@@ -147,7 +158,7 @@ export function CollectionPage({ name: key }: { name: string }) {
         }} />
       <input ref={upload} type="file" accept="image/*" className="hidden"
         onChange={(e) => { onUpload(e.target.files?.[0]); e.target.value = ""; }} />
-      <CoverPicker open={picking} onClose={() => setPicking(false)} items={items} current={c.cover_url ? null : c.covers[0] ?? null}
+      <CoverPicker open={picking} onClose={() => setPicking(false)} items={items} current={c.cover_url ? null : c.covers[0]?.name ?? null}
         extra={
           <button type="button" onClick={() => upload.current?.click()}
             className="flex h-8 items-center gap-1.5 rounded-sm border border-line-strong px-3 text-[13px] hover:bg-white/5">

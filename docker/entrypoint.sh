@@ -23,5 +23,5 @@ echo "[tubegrab] serving on :$TUBEGRAB_PORT as uid=$PUID gid=$PGID, library at $
 exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups \
     gunicorn app:app \
         --bind "0.0.0.0:$TUBEGRAB_PORT" \
-        --workers 1 --threads 32 --timeout 0 \
+        --workers 1 --threads 64 --timeout 0 \
         --access-logfile - --error-logfile -

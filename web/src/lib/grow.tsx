@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-/** Render a long list a screenful at a time: more appear as you scroll near the end. */
+/** Render a long in-memory list a screenful at a time: more appear as you scroll near the end. */
 export function useShowMore<T>(list: T[], step = 48) {
   const [n, setN] = useState(step);
   const end = useRef<HTMLDivElement>(null);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
-import { api, type Collection, type LibraryFile, type SearchResult } from "../api";
+import { api, urls, type Collection, type LibraryFile, type SearchResult } from "../api";
 import { Link, watchPath } from "../router";
 import { Thumb } from "../components/Thumb";
 import { bytes, duration, longDuration } from "../lib/format";
@@ -8,8 +8,9 @@ import { VideoCard } from "../components/VideoCard";
 import { GrabForm } from "../components/GrabForm";
 import { CollectionCard } from "../components/CollectionCard";
 import { Tab } from "../components/ui";
-import { Grow } from "../lib/showMore";
-import { SearchBox, SectionHead as Head } from "./Music";
+import { usePaged } from "../lib/cache";
+import { Grow } from "../lib/grow";
+import { SearchBox, SectionHead as Head, useDebounced } from "./Music";
 
 type Kind = "all" | "video" | "audio";
 type Sort = "new" | "old" | "title" | "size" | "long";
@@ -37,15 +38,13 @@ function Collections({ items }: { items: Collection[] }) {
           </button>
         )}
       </SectionHead>
-      <div className={GRID}>
-        {(all ? items : items.slice(0, LIMIT)).map((c) => <CollectionCard key={c.key} c={c} />)}
-      </div>
+      <Grow list={all ? items : items.slice(0, LIMIT)} className={GRID}>{(c) => <CollectionCard key={c.key} c={c} />}</Grow>
     </section>
   );
 }
 
 /** Words spoken in your videos (from their captions). */
-function SpokenResults({ q, files, emptyText }: { q: string; files: LibraryFile[]; emptyText?: boolean }) {
+function SpokenResults({ q, emptyText }: { q: string; emptyText?: boolean }) {
   const [results, setResults] = useState<SearchResult[] | null>(null);
   useEffect(() => {
     const term = q.trim();
@@ -54,8 +53,7 @@ function SpokenResults({ q, files, emptyText }: { q: string; files: LibraryFile[
     const t = setTimeout(() => api.search(term).then((r) => { if (live) setResults(r); }).catch(() => {}), 250);
     return () => { live = false; clearTimeout(t); };
   }, [q]);
-  const by = useMemo(() => new Map(files.map((f) => [f.name, f])), [files]);
-  const shown = (results ?? []).filter((r) => by.has(r.name));
+  const shown = results ?? [];
   if (!shown.length) {
     return emptyText && (results !== null || q.trim().length < 3)
       ? <p className="py-16 text-center text-[13px] text-muted">No matches.</p> : null;
@@ -70,7 +68,7 @@ function SpokenResults({ q, files, emptyText }: { q: string; files: LibraryFile[
       <SectionHead title="Said in videos" />
       <div className="space-y-5">
         {shown.map((r) => {
-          const f = by.get(r.name)!;
+          const f = r.file;
           return (
             <div key={r.name} className="flex gap-4">
               <Link to={watchPath(f.name)} className="w-32 shrink-0 sm:w-40"><Thumb file={f} className="aspect-video rounded-sm" /></Link>
@@ -104,43 +102,24 @@ function Empty() {
 }
 
 export function Videos() {
-  const store = useStore();
-  const { filesLoaded } = store;
-  const files = useMemo(() => store.files.filter((f) => f.section !== "Music"), [store.files]);
-  const collections = useMemo(() => store.collections.filter((c) => c.section !== "Music"), [store.collections]);
+  const { library } = useStore();
+  const collections = useMemo(() => (library?.collections ?? []).filter((c) => c.section !== "Music"), [library]);
+  const stats = library?.stats.videos;
   const [q, setQ] = useState("");
   const [kind, setKind] = useState<Kind>("all");
   const [sort, setSort] = useState<Sort>("new");
+  const term = useDebounced(q.trim());
+  const list = usePaged<LibraryFile>(urls.files({ section: "videos", kind: kind === "all" ? undefined : kind, q: term, sort }), 48);
 
-  const stats = useMemo(() => ({
-    size: files.reduce((a, f) => a + f.size, 0),
-    time: files.reduce((a, f) => a + (f.duration ?? 0), 0),
-    audio: files.filter((f) => f.kind === "audio").length,
-  }), [files]);
-
-  const list = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const out = files.filter((f) => (kind === "all" || f.kind === kind)
-      && (!needle || [f.title, f.uploader, f.collection].some((x) => x?.toLowerCase().includes(needle))));
-    const cmp: Record<Sort, (a: LibraryFile, b: LibraryFile) => number> = {
-      new: (a, b) => b.mtime - a.mtime,
-      old: (a, b) => a.mtime - b.mtime,
-      title: (a, b) => a.title.localeCompare(b.title),
-      size: (a, b) => b.size - a.size,
-      long: (a, b) => (b.duration ?? 0) - (a.duration ?? 0),
-    };
-    return out.sort(cmp[sort]);
-  }, [files, q, kind, sort]);
-
-  if (!filesLoaded) {
+  if (!library || (!library.ready && !collections.length)) {
     return (
       <div className={`mt-10 ${GRID}`}>
         {Array.from({ length: 10 }, (_, i) => <div key={i} className="aspect-video rounded-sm bg-surface" />)}
       </div>
     );
   }
-  if (!files.length) return <Empty />;
-  const filtering = q || kind !== "all";
+  if (!stats?.count) return <Empty />;
+  const filtering = !!q || kind !== "all";
 
   return (
     <>
@@ -149,10 +128,10 @@ export function Videos() {
         <div className="order-0 flex w-full items-baseline gap-3 sm:mr-auto sm:w-auto">
           <h1 className="text-[15px] font-medium">Videos</h1>
           <span className="font-mono text-[11px] text-faint tabular">
-            {files.length} · {stats.time > 0 && <>{longDuration(stats.time)} · </>}{bytes(stats.size)}
+            {stats.count} · {stats.duration > 0 && <>{longDuration(stats.duration)} · </>}{bytes(stats.size)}
           </span>
         </div>
-        {stats.audio > 0 && stats.audio < files.length && (
+        {stats.audio > 0 && stats.audio < stats.count && (
           <div className="order-2 flex items-center gap-4 sm:order-none">
             {(["all", "video", "audio"] as Kind[]).map((k) => (
               <Tab key={k} active={kind === k} onClick={() => setKind(k)} className="capitalize">{k}</Tab>
@@ -168,15 +147,15 @@ export function Videos() {
 
       {!filtering && collections.length > 0 && <Collections items={collections} />}
 
-      {(list.length > 0 || !q) && (
+      {(list.items.length > 0 || !q) && (
         <section className="mt-10">
-          <SectionHead title={filtering ? `${list.length} result${list.length === 1 ? "" : "s"}` : "Recent"} />
-          {list.length
-            ? <Grow list={list} className={GRID}>{(f) => <VideoCard key={f.name} file={f} />}</Grow>
-            : <p className="py-16 text-center text-[13px] text-muted">No matches.</p>}
+          <SectionHead title={filtering ? `${list.total} result${list.total === 1 ? "" : "s"}` : "Recent"} />
+          {list.items.length
+            ? <><div className={GRID}>{list.items.map((f) => <VideoCard key={f.name} file={f} />)}</div>{list.sentinel}</>
+            : list.loaded && <p className="py-16 text-center text-[13px] text-muted">No matches.</p>}
         </section>
       )}
-      {q && <SpokenResults q={q} files={files} emptyText={!list.length} />}
+      {q && <SpokenResults q={q} emptyText={list.loaded && !list.items.length} />}
     </>
   );
 }

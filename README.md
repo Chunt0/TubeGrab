@@ -106,11 +106,28 @@ Image → Import (the NAS must have the same CPU architecture).
 - **Phones**: bottom tab bar, docked mini player, add to home screen for a
   full-screen app
 - Downloads page (`/downloads`): live job cards plus a file manager
-- Built for a small NAS: the library listing is built once and only rebuilt
-  when a folder or metadata changes; devices poll it with ETags, so "nothing
-  changed" costs ~0 bytes. Grids load ~480 px thumbnail copies (made once, in
-  `.meta/thumbs/sm/`) and render more cards as you scroll. Tested at 11k tracks:
-  rebuild ≈ 0.7 s on a desktop CPU, unchanged polls < 1 ms
+- Built to stay fast at 50k+ items on a small NAS:
+  - **SQLite index** (`.meta/library.db`): one row per file and per collection,
+    kept up to date incrementally — folder mtimes say which folders changed,
+    metadata writes mark exactly the rows they affect, and a once-a-minute check
+    catches changes made over SMB / File Station. It's only an index: delete it
+    and it's rebuilt. Edits return once the index has them.
+  - **The device asks for what it shows**: collections + totals come whole
+    (`/api/library`), everything else is queried and paged (`/api/files`,
+    `/api/watch/<file>` for what plays next, `/api/search` for captions).
+  - **Opens instantly**: answers are cached on the device (IndexedDB) and
+    re-checked with ETags; a service worker keeps the app shell and thumbnails
+    (on https, e.g. through a reverse proxy).
+  - **Live updates** over server-sent events (`/api/events`): library changes,
+    progress from other devices, download status — no polling.
+  - **Thumbnails**: grid-sized copies with a placeholder colour, at permanent
+    URLs (`?v=<version>`, cached for a year).
+  - **Caption search** uses SQLite full-text search (word forms: "derive"
+    finds "derivative"; partial last word).
+  - **Video seeking** is sent straight from disk (sendfile), never buffered.
+  - Measured with 50,000 items (40k songs, 10k videos): first index ≈ 45 s on a
+    desktop CPU, list queries ≈ 25 ms, unchanged checks < 1 ms, every screen
+    under 0.7 s with a phone-speed CPU.
 
 ## Updating yt-dlp
 

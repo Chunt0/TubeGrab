@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, GripVertical, Image as ImageIcon, Pencil, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import { useStore } from "../store";
-import { playlistFiles, type LibraryFile, type Playlist } from "../api";
+import { HttpError, urls, type LibraryFile, type Playlist } from "../api";
+import { useQuery } from "../lib/cache";
 import { Link, useRouter, watchPath } from "../router";
 import { bytes, cleanChannel, cx, duration, longDuration } from "../lib/format";
 import { Thumb } from "../components/Thumb";
@@ -97,23 +98,24 @@ function SortableList({ p, items, onReorder, onRemove }: {
 }
 
 export function PlaylistPage({ id }: { id: string }) {
-  const { playlists, files, filesLoaded, updatePlaylist, deletePlaylist, uploadPlaylistCover, toast } = useStore();
+  const { updatePlaylist, deletePlaylist, uploadPlaylistCover, toast } = useStore();
   const { navigate } = useRouter();
   const [editing, setEditing] = useState(false);
   const [picking, setPicking] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const upload = useRef<HTMLInputElement>(null);
-  const p = playlists.find((x) => x.id === id);
-  const items = p ? playlistFiles(p, files) : [];
+  const { data, error } = useQuery<{ playlist: Playlist }>(urls.playlist(id));
+  const p = data?.playlist;
+  const items = p?.files ?? [];
 
-  useEffect(() => { if (filesLoaded && !p) navigate("/playlists", true); }, [filesLoaded, p, navigate]);
+  useEffect(() => { if (error instanceof HttpError && error.status === 404) navigate("/playlists", true); }, [error, navigate]);
   useEffect(() => {
     if (p) document.title = p.title;
     return () => { document.title = "Library"; };
   }, [p]);
   if (!p) return null;
 
-  const time = items.reduce((t, f) => t + (f.duration ?? 0), 0);
+  const time = p.duration;
   const custom = !!(p.cover_upload || p.cover_item);
   const fail = (e: unknown) => toast({ kind: "bad", title: "Couldn't save", body: e instanceof Error ? e.message : String(e) });
 
@@ -134,7 +136,7 @@ export function PlaylistPage({ id }: { id: string }) {
 
       <div className="mt-6 grid gap-8 md:grid-cols-[minmax(0,280px)_minmax(0,1fr)] lg:gap-12">
         <div>
-          <PlaylistCover p={p} files={files} className="w-full max-w-[280px]" />
+          <PlaylistCover p={p} className="w-full max-w-[280px]" />
           <p className="mt-5 text-xs text-muted">Playlist</p>
           <h1 className="mt-1 break-words text-2xl font-medium leading-tight tracking-tight">{p.title}</h1>
           {p.description && <p className="mt-2 whitespace-pre-line break-words text-[13px] leading-relaxed text-fg/70">{p.description}</p>}

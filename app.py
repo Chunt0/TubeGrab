@@ -21,6 +21,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -70,9 +71,11 @@ _GZIP_TYPES = ("application/json", "text/html", "text/css", "text/javascript", "
 
 @app.after_request
 def _changed(resp):
-    """Anything that edits the library makes the next listing request look again."""
-    if request.method in ("POST", "PATCH", "PUT", "DELETE") and request.path != "/api/progress":
-        _meta_changed()
+    """Edits to the library are in the index before their answer goes out, so
+    whatever the client fetches next already shows them."""
+    if (request.method in ("POST", "PATCH", "PUT", "DELETE")
+            and not request.path.startswith(("/api/progress", "/api/download", "/api/jobs", "/api/playlists"))):
+        _indexer.flush()
     return resp
 
 
@@ -292,23 +295,52 @@ def _read_json(path: Path, default):
         return default
 
 
-_meta_gen = 0   # bumped by every metadata write that can change the library listing
+def _meta_changed(**changes) -> None:
+    """Tell the library index something changed (it looks for changed folders, plus
+    any rows / ids / folders named)."""
+    ix = globals().get("_indexer")
+    if ix is not None:
+        ix.kick(**changes)
 
 
-def _meta_changed() -> None:
-    global _meta_gen
-    _meta_gen += 1
+_last_json: dict[str, dict] = {}
+
+
+def _diff_keys(old: dict, new: dict) -> set:
+    return {k for k in old.keys() | new.keys() if old.get(k) != new.get(k)}
 
 
 def _write_json(path: Path, data) -> None:
+    old = None
+    if path in (INDEX_FILE, FOLDERS_FILE):
+        old = _last_json.get(path.name)
+        if old is None:
+            old = _read_json(path, {})
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
     tmp.replace(path)
-    if path.name not in ("progress.json", "probe.json"):
-        _meta_changed()
+    if path == INDEX_FILE:      # files that got (or lost) an id: rebuild their rows
+        changed = _diff_keys(old, data)
+        _last_json[path.name] = json.loads(json.dumps(data))
+        _meta_changed(names=[n for k in changed for n in (old.get(k), data.get(k)) if n])
+    elif path == FOLDERS_FILE:  # names, covers: rebuild those folders
+        changed = _diff_keys(old, data)
+        _last_json[path.name] = json.loads(json.dumps(data))
+        _meta_changed(dirs=changed)
+    elif path == PLAYLISTS_FILE:
+        if "_lib_bump" in globals():
+            _lib_bump()
+
+
+_DL_PREFIX = str(DOWNLOAD_DIR) + os.sep
 
 
 def _rel(path: Path) -> str:
+    """Library-relative name. Paths built from the library folder are already
+    absolute and clean: plain string work (resolve() is slow, and this runs per file)."""
+    s = str(path)
+    if s.startswith(_DL_PREFIX) and "/." not in s[len(_DL_PREFIX) - 1:]:
+        return s[len(_DL_PREFIX):].replace(os.sep, "/")
     return path.resolve().relative_to(DOWNLOAD_DIR).as_posix()
 
 
@@ -397,6 +429,7 @@ def _write_meta(info: dict, extra: dict | None = None) -> None:
         for k, v in old.items():
             meta.setdefault(k, v)
         _write_json(path, meta)
+    _meta_changed(walk=False, vids=[vid])
 
 
 def _meta_for(vid: str | None) -> dict:
@@ -451,23 +484,6 @@ def _iter_media():
     """All library media files."""
     for root, n, _, _ in _walk_media():
         yield Path(root, n)
-
-
-def _tree_stamp() -> tuple:
-    """Folder mtimes of the library (not .meta): any file added, removed, renamed
-    or replaced changes one, so an unchanged stamp means an unchanged listing."""
-    out = []
-    stack = [str(DOWNLOAD_DIR)]
-    while stack:
-        d = stack.pop()
-        try:
-            out.append((d, os.stat(d).st_mtime_ns))
-            with os.scandir(d) as it:
-                stack.extend(e.path for e in it if not e.name.startswith(".") and e.is_dir(follow_symlinks=False))
-        except OSError:
-            continue
-    out.sort()
-    return tuple(out)
 
 
 def _find_existing(vid: str, kind: str) -> Path | None:
@@ -531,12 +547,14 @@ def _retag(path: Path, tags: dict) -> None:
 def _update(job_id: str, **fields) -> None:
     with _lock:
         _jobs[job_id].update(fields)
+    _jobs_dirty.set()
     if "status" in fields:
-        _meta_changed()   # a finished job: the next library poll looks again
+        _meta_changed()   # a finished job: look for what it filed
 
 
 def _add_file(job_id: str, path: str) -> None:
     _meta_changed()
+    _jobs_dirty.set()
     with _lock:
         files = _jobs[job_id]["files"]
         if path not in files:
@@ -960,17 +978,6 @@ def _generate_thumb(path: Path, out: Path) -> None:
 # ffprobe is slow on a NAS CPU: keep results on disk so restarts/deploys are instant
 PROBE_FILE = META_DIR / "probe.json"
 _probe_cache: dict[str, dict] = _read_json(PROBE_FILE, {})
-_probe_dirty = False
-
-
-def _save_probe_cache() -> None:
-    global _probe_dirty
-    if not _probe_dirty:
-        return
-    _probe_dirty = False
-    with _meta_lock:
-        live = {k: v for k, v in _probe_cache.items() if os.path.exists(k.split("|")[0])}
-        _write_json(PROBE_FILE, live)
 
 
 def _probe(path: Path | str, st: os.stat_result | None = None) -> dict:
@@ -996,9 +1003,7 @@ def _probe(path: Path | str, st: os.stat_result | None = None) -> dict:
                 break
     except Exception:  # noqa: BLE001 — cosmetic
         pass
-    global _probe_dirty
     _probe_cache[key] = res
-    _probe_dirty = True
     return res
 
 
@@ -1024,10 +1029,6 @@ def _collection_info(key: str) -> dict:
     return info
 
 
-def _progress_fields(p: dict | None) -> dict:
-    return {"pos": (p or {}).get("pos") or 0, "watched": bool((p or {}).get("watched"))}
-
-
 def _clean_chapters(meta: dict) -> list[dict] | None:
     """Real chapters only (not the single 'whole video' one cutting sponsors leaves)."""
     ch = meta.get("chapters") or []
@@ -1036,172 +1037,546 @@ def _clean_chapters(meta: dict) -> list[dict] | None:
     return [{"start": round(c.get("start_time") or 0, 2), "title": c.get("title") or ""} for c in ch]
 
 
-_meta_cache: dict[str, tuple[int, dict]] = {}
+# ---------------------------------------------------------------- library index
+# The library is indexed in SQLite (.meta/library.db): one row per media file,
+# one per collection, plus a full-text index of video captions. It is kept in
+# step incrementally: folder mtimes say which folders changed (files added,
+# removed, renamed or replaced), and metadata writes made by this process mark
+# exactly the rows they affect. It is only an index — delete it and it is
+# rebuilt from the files.
+
+DB_FILE = META_DIR / "library.db"
+DB_SCHEMA = 2
+_dbl = threading.local()
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS files(
+  name TEXT PRIMARY KEY, dir TEXT NOT NULL, section TEXT NOT NULL, kind TEXT NOT NULL,
+  title TEXT NOT NULL, sort_title TEXT NOT NULL, search TEXT NOT NULL,
+  size INTEGER NOT NULL, mtime REAL NOT NULL, duration REAL, height INTEGER,
+  vid TEXT, ref TEXT NOT NULL, artist TEXT, album TEXT, uploader TEXT, upload_date TEXT,
+  year TEXT, url TEXT, idx INTEGER, art TEXT, tv TEXT NOT NULL, chapters TEXT,
+  subs INTEGER NOT NULL DEFAULT 0, lyrics TEXT, fstamp TEXT NOT NULL, mstamp TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS files_dir ON files(dir);
+CREATE INDEX IF NOT EXISTS files_section ON files(section, mtime);
+CREATE INDEX IF NOT EXISTS files_ref ON files(ref);
+CREATE INDEX IF NOT EXISTS files_vid ON files(vid);
+CREATE INDEX IF NOT EXISTS files_mtime ON files(mtime);
+CREATE TABLE IF NOT EXISTS collections(key TEXT PRIMARY KEY, section TEXT NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dirs(path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS progress(ref TEXT PRIMARY KEY, pos REAL NOT NULL DEFAULT 0, watched INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS colors(tv TEXT PRIMARY KEY, color TEXT);
+CREATE TABLE IF NOT EXISTS caption_state(name TEXT PRIMARY KEY, stamp TEXT NOT NULL, lo INTEGER, hi INTEGER);
+CREATE VIRTUAL TABLE IF NOT EXISTS captions USING fts5(text, name UNINDEXED, start UNINDEXED, i UNINDEXED,
+  tokenize='porter unicode61 remove_diacritics 2');
+"""
+_FILE_COLS = ("name", "dir", "section", "kind", "title", "sort_title", "search", "size", "mtime", "duration",
+              "height", "vid", "ref", "artist", "album", "uploader", "upload_date", "year", "url", "idx", "art",
+              "tv", "chapters", "subs", "lyrics", "fstamp", "mstamp")
+_INSERT_FILE = f"INSERT OR REPLACE INTO files({','.join(_FILE_COLS)}) VALUES({','.join('?' * len(_FILE_COLS))})"
 
 
-def _meta_cached(vid: str | None) -> dict:
-    """_meta_for, kept parsed in memory until the file changes (read-only use)."""
-    if not vid:
-        return {}
-    p = f"{META_DIR}/{vid}.json"
+def _db() -> sqlite3.Connection:
+    """This thread's connection (WAL: readers never wait for the indexer)."""
+    con = getattr(_dbl, "con", None)
+    if con is None:
+        con = sqlite3.connect(DB_FILE, timeout=15, isolation_level=None, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        for p in ("journal_mode=WAL", "synchronous=NORMAL", "busy_timeout=15000", "temp_store=MEMORY", "cache_size=-16000"):
+            con.execute(f"PRAGMA {p}")
+        _dbl.con = con
+    return con
+
+
+class _tx:
+    """BEGIN IMMEDIATE … COMMIT (or ROLLBACK on error)."""
+    def __init__(self, con: sqlite3.Connection):
+        self.con = con
+
+    def __enter__(self):
+        self.con.execute("BEGIN IMMEDIATE")
+        return self.con
+
+    def __exit__(self, exc_type, *_):
+        self.con.execute("ROLLBACK" if exc_type else "COMMIT")
+        return False
+
+
+def _db_init() -> None:
+    con = _db()
+    if con.execute("PRAGMA user_version").fetchone()[0] != DB_SCHEMA:
+        for t in ("files", "collections", "dirs", "progress", "colors", "caption_state", "captions"):
+            con.execute(f"DROP TABLE IF EXISTS {t}")
+        con.execute("VACUUM")
+    con.executescript(_SCHEMA)
+    con.execute(f"PRAGMA user_version={DB_SCHEMA}")
+    _progress_to_db(_progress())
+
+
+def _progress_to_db(prog: dict) -> None:
+    """progress.json is the record; the table mirrors it so queries can join it."""
+    con = _db()
+    with _tx(con):
+        con.execute("DELETE FROM progress")
+        con.executemany("INSERT INTO progress VALUES(?,?,?)",
+                        [(r, float(p.get("pos") or 0), 1 if p.get("watched") else 0) for r, p in prog.items()])
+
+
+# -- change notifications: a version every client watches (see /api/events)
+
+_bus = threading.Condition()
+_bus_seq = 0
+_bus_last: dict[str, tuple[int, str]] = {}          # latest event of each kind
+_bus_prog: list[tuple[int, str]] = []               # recent progress patches (all of them matter)
+_lib_version = 0
+
+
+def _publish(kind: str, data) -> None:
+    global _bus_seq
+    payload = json.dumps(data, separators=(",", ":"))
+    with _bus:
+        _bus_seq += 1
+        if kind == "progress":
+            _bus_prog.append((_bus_seq, payload))
+            del _bus_prog[:-200]
+        else:
+            _bus_last[kind] = (_bus_seq, payload)
+        _bus.notify_all()
+
+
+def _lib_bump() -> None:
+    """Something clients show changed: they re-check what they have (ETags make
+    unchanged answers free)."""
+    global _lib_version
+    _lib_version += 1
+    _publish("lib", {"v": f"{_BOOT}-{_lib_version}"})
+
+
+_BOOT = uuid.uuid4().hex[:6]
+
+
+# -- the indexer: one background thread applies every change
+
+class _Indexer:
+    def __init__(self):
+        self.wake = threading.Event()
+        self.lock = threading.Lock()
+        self.vids: set[str] = set()       # metadata of these ids changed
+        self.names: set[str] = set()      # these rows need rebuilding
+        self.dirs: set[str] = set()       # every row in these folders needs rebuilding
+        self.walk = True                  # look for changed folders
+        self.verify = True                # compare every row's metadata stamp (startup, hourly)
+        self.ready = threading.Event()    # first full pass done
+        self.known: dict[str, int] = {}   # folder → mtime_ns, mirrors the dirs table
+        self.asked = 0                    # kicks so far / kicks a finished pass has covered
+        self.covered = 0
+        self.urgent = False
+        self.done = threading.Condition()
+
+    def kick(self, *, walk: bool = True, vids=(), names=(), dirs=()) -> int:
+        with self.lock:
+            self.walk = self.walk or walk
+            self.vids.update(v for v in vids if v)
+            self.names.update(n for n in names if n)
+            self.dirs.update(d for d in dirs if d is not None)
+            self.asked += 1
+            n = self.asked
+        self.wake.set()
+        return n
+
+    def flush(self, timeout: float = 8) -> None:
+        """Apply pending changes now and wait for them (after an edit, so the
+        answer the client gets next already shows it)."""
+        if threading.current_thread().name == "indexer":
+            return
+        self.urgent = True               # (before the kick, so the indexer doesn't pause first)
+        n = self.kick()
+        with self.done:
+            self.done.wait_for(lambda: self.covered >= n, timeout=timeout)
+
+    def run(self) -> None:
+        _db_init()
+        self.known = {r[0]: r[1] for r in _db().execute("SELECT path, mtime FROM dirs")}
+        last_verify = time.monotonic()
+        while True:
+            with self.lock:
+                covers = self.asked
+            try:
+                self.sync()
+            except Exception as exc:  # noqa: BLE001 — keep indexing
+                import traceback
+                traceback.print_exc()
+                print(f"[tubegrab] index sync failed: {exc}")
+            self.ready.set()
+            with self.done:
+                self.covered = covers
+                self.done.notify_all()
+            self.wake.wait(timeout=60)    # no news: look for outside changes (SMB, File Station) once a minute
+            if not self.wake.is_set():
+                with self.lock:
+                    self.walk = True
+                    if time.monotonic() - last_verify > 3600:
+                        self.verify, last_verify = True, time.monotonic()
+            self.wake.clear()
+            for _ in range(6):            # let bursts of changes (a download landing) settle into one pass…
+                if self.urgent:           # …unless an edit is waiting for it
+                    break
+                time.sleep(0.05)
+            self.urgent = False
+
+    def sync(self) -> None:
+        with self.lock:
+            walk, verify = self.walk, self.verify
+            vids, names, force_dirs = self.vids, self.names, self.dirs
+            self.walk = self.verify = False
+            self.vids, self.names, self.dirs = set(), set(), set()
+        con = _db()
+        changed_dirs: set[str] = set(force_dirs)
+        gone_dirs: set[str] = set()
+        if walk:
+            seen: dict[str, int] = {}
+            base = len(str(DOWNLOAD_DIR)) + 1
+            stack = [str(DOWNLOAD_DIR)]
+            while stack:
+                d = stack.pop()
+                try:
+                    mt = os.stat(d).st_mtime_ns
+                    with os.scandir(d) as it:
+                        stack.extend(e.path for e in it if not e.name.startswith(".") and e.is_dir(follow_symlinks=False))
+                except OSError:
+                    continue
+                rel = d[base:].replace(os.sep, "/") if len(d) >= base else ""
+                seen[rel] = mt
+                if self.known.get(rel) != mt:
+                    changed_dirs.add(rel)
+            gone_dirs = set(self.known) - set(seen)
+            new_known = seen
+        else:
+            new_known = None
+
+        folders = _json_cached(FOLDERS_FILE)
+        by_path = {v: k.split(":")[0] for k, v in _json_cached(INDEX_FILE).items()}
+        covers: dict = {}
+        upserts: list[dict] = []
+        deletes: set[str] = set()
+        touched: set[str] = set(gone_dirs)
+
+        for d in gone_dirs:
+            for (n,) in con.execute("SELECT name FROM files WHERE dir=?", (d,)):
+                deletes.add(n)
+        for d in changed_dirs:
+            if d in gone_dirs:
+                continue
+            full = os.path.join(DOWNLOAD_DIR, d) if d else str(DOWNLOAD_DIR)
+            have = {r["name"]: r for r in con.execute("SELECT * FROM files WHERE dir=?", (d,))}
+            present = set()
+            try:
+                entries = list(os.scandir(full))
+            except OSError:
+                entries = []
+            for e in entries:
+                n = e.name
+                stem, ext = os.path.splitext(n)
+                if n.startswith(".") or ext.lower() not in MEDIA_EXTS or _TEMP_STEM.search(stem):
+                    continue
+                try:
+                    if not e.is_file():
+                        continue
+                    st = e.stat()
+                except OSError:
+                    continue
+                rel = f"{d}/{n}" if d else n
+                present.add(rel)
+                old = have.get(rel)
+                if old is None or d in force_dirs or rel in names or old["fstamp"] != f"{st.st_mtime_ns}:{st.st_size}":
+                    upserts.append(_build_row(e.path, rel, st, by_path, folders, covers, old))
+            for rel in set(have) - present:
+                deletes.add(rel)
+            touched.add(d)
+
+        # metadata changes (and periodic verification) for rows not rebuilt above
+        done = {u["name"] for u in upserts} | deletes
+        redo: set[str] = set(n for n in names if n not in done)
+        if vids:
+            vl = list(vids)
+            for i in range(0, len(vl), 500):
+                chunk = vl[i:i + 500]
+                redo.update(r[0] for r in con.execute(
+                    f"SELECT name FROM files WHERE vid IN ({','.join('?' * len(chunk))})", chunk))
+        if verify:
+            listing = set(os.listdir(META_DIR))
+            for r in con.execute("SELECT name, vid, mstamp FROM files"):
+                if r["name"] in done or not r["vid"]:
+                    continue
+                if _meta_stamp(r["vid"], listing) != r["mstamp"]:
+                    redo.add(r["name"])
+        for rel in redo - done:
+            full = os.path.join(DOWNLOAD_DIR, rel)
+            try:
+                st = os.stat(full)
+            except OSError:
+                deletes.add(rel)
+                continue
+            old = con.execute("SELECT * FROM files WHERE name=?", (rel,)).fetchone()
+            upserts.append(_build_row(full, rel, st, by_path, folders, covers, old))
+
+        for u in upserts:
+            touched.add(u["dir"])
+        for n in deletes:
+            touched.add(n.rpartition("/")[0])
+        dirs_moved = new_known is not None and new_known != self.known
+        if not upserts and not deletes and not dirs_moved and not force_dirs:
+            return
+        coll_changed = False
+
+        with _tx(con):
+            if deletes:
+                dl = list(deletes)
+                for i in range(0, len(dl), 500):
+                    chunk = dl[i:i + 500]
+                    q = ",".join("?" * len(chunk))
+                    con.execute(f"DELETE FROM files WHERE name IN ({q})", chunk)
+                    for lo, hi in con.execute(f"SELECT lo, hi FROM caption_state WHERE name IN ({q}) AND lo IS NOT NULL", chunk).fetchall():
+                        con.execute("DELETE FROM captions WHERE rowid BETWEEN ? AND ?", (lo, hi))
+                    con.execute(f"DELETE FROM caption_state WHERE name IN ({q})", chunk)
+            con.executemany(_INSERT_FILE, [tuple(u[c] for c in _FILE_COLS) for u in upserts])
+            for key in touched:
+                if not key:
+                    continue
+                data = _collection_data(con, key, folders)
+                old = con.execute("SELECT data FROM collections WHERE key=?", (key,)).fetchone()
+                if data is None:
+                    if old:
+                        con.execute("DELETE FROM collections WHERE key=?", (key,))
+                        coll_changed = True
+                    continue
+                blob = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+                if not old or old[0] != blob:
+                    con.execute("INSERT OR REPLACE INTO collections VALUES(?,?,?,?)", (key, data["section"], data["updated"], blob))
+                    coll_changed = True
+            if new_known is not None:
+                for d in gone_dirs:
+                    con.execute("DELETE FROM dirs WHERE path=?", (d,))
+                con.executemany("INSERT OR REPLACE INTO dirs VALUES(?,?)",
+                                [(d, m) for d, m in new_known.items() if self.known.get(d) != m])
+        if new_known is not None:
+            self.known = new_known
+        videos = [u for u in upserts if u["kind"] == "video"]
+        for i in range(0, len(videos), 40):   # short transactions: progress writes never wait long
+            with _tx(con):
+                for u in videos[i:i + 40]:
+                    _index_captions(con, u["name"], u["vid"] if u["subs"] else None)
+        if upserts or deletes or coll_changed:
+            _lib_bump()
+
+
+_indexer = _Indexer()
+_jc: dict[str, tuple[int, dict]] = {}
+
+
+def _json_cached(path: Path) -> dict:
+    """index.json / folders.json for the indexer: parsed again only when they change."""
     try:
-        st = os.stat(p)
+        mt = path.stat().st_mtime_ns
     except OSError:
         return {}
-    stamp = st.st_mtime_ns ^ st.st_size
-    hit = _meta_cache.get(vid)
-    if hit and hit[0] == stamp:
+    hit = _jc.get(str(path))
+    if hit and hit[0] == mt:
         return hit[1]
-    data = _read_json(Path(p), {})
-    _meta_cache[vid] = (stamp, data)
+    data = _read_json(path, {})
+    _jc[str(path)] = (mt, data)
     return data
 
 
-def _library() -> tuple[list[dict], list[dict], dict[str, str]]:
-    """Every file + every collection, and progress ref → library name."""
-    folders = _folders()
-    by_path = _ids_by_path()
-    names = os.listdir(META_DIR)
-    subs = {n.split(".")[0] for n in names if n.endswith(".vtt")}
-    lyrics = {n[:-4]: "synced" for n in names if n.endswith(".lrc")} | {n[:-11]: "plain" for n in names if n.endswith(".lyrics.txt")}
-    covers: dict[str, tuple | None] = {}   # folder → custom cover, looked up once per folder
-    infos: dict[str, dict] = {}
-    refs: dict[str, str] = {}
-    files: list[dict] = []
-    base = len(str(DOWNLOAD_DIR)) + 1
-    for root, fname, stem, ext in _walk_media():   # plain strings: pathlib is slow per file
-        path = os.path.join(root, fname)
+def _meta_stamp(vid: str | None, listing: set[str] | None = None) -> str:
+    """Changes when anything a row shows from .meta changes: the metadata file, and
+    whether captions / lyrics exist."""
+    if not vid:
+        return ""
+    try:
+        st = os.stat(f"{META_DIR}/{vid}.json")
+        j = f"{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        j = ""
+    if listing is not None:
+        has = lambda s: f"{vid}{s}" in listing   # noqa: E731
+    else:
+        has = lambda s: os.path.exists(f"{META_DIR}/{vid}{s}")   # noqa: E731
+    flags = "".join("1" if has(sfx) else "0" for sfx in (".lrc", ".lyrics.txt", *(f".{lang}.vtt" for lang in SUB_LANGS)))
+    return f"{j}|{flags}"
+
+
+def _build_row(full: str, rel: str, st: os.stat_result, by_path: dict, folders: dict, covers: dict,
+               old: sqlite3.Row | None) -> dict:
+    fname = rel.rpartition("/")[2]
+    stem, ext = os.path.splitext(fname)
+    kind = "audio" if ext.lower() in AUDIO_EXTS else "video"
+    m = ID_RE.search(stem)
+    vid = by_path.get(rel) or (m.group(1) if m else None)
+    meta = _meta_for(vid)
+    fstamp = f"{st.st_mtime_ns}:{st.st_size}"
+    if old is not None and old["fstamp"] == fstamp and old["duration"] is not None:
+        duration, height = old["duration"], old["height"]   # same file: no need to ffprobe again
+    else:
+        probe = _probe(full, st)
+        duration, height = probe["duration"] or meta.get("duration"), probe["height"]
+    key = rel.rpartition("/")[0]
+    c = _collection_info(key) if key else {"section": "Other", "artist": None}
+    art = None
+    src = None
+    if c["section"] == "Music" and kind == "audio" and key:
+        if key not in covers:
+            covers[key] = _folder_cover(key, folders)
+        if covers[key]:
+            src, art = covers[key]
+    if src is None and vid:
+        src = _meta_thumb(vid)
+    try:
+        s2 = src.stat() if src else None
+        basis = f"{src}|{s2.st_mtime_ns}|{s2.st_size}" if s2 else f"{rel}|{fstamp}"
+    except OSError:
+        basis = f"{rel}|{fstamp}"
+    title = meta.get("track") or meta.get("title") or _display_title(fname)
+    artist = meta.get("artist") or c.get("artist") or _clean_channel(meta.get("uploader"))
+    uploader = _clean_channel(meta.get("uploader") or meta.get("channel"))
+    album = meta.get("album")
+    mi = INDEX_PREFIX_RE.match(fname)
+    ch = _clean_chapters(meta)
+    lyrics = None
+    if vid and kind == "audio":
+        lyrics = ("synced" if os.path.exists(f"{META_DIR}/{vid}.lrc")
+                  else "plain" if os.path.exists(f"{META_DIR}/{vid}.lyrics.txt") else None)
+    return {
+        "name": rel, "dir": key, "section": c["section"], "kind": kind,
+        "title": title, "sort_title": title.casefold(),
+        "search": " ".join(x for x in (title, artist, album, uploader, key) if x).casefold(),
+        "size": st.st_size, "mtime": st.st_mtime, "duration": duration,
+        "height": height if kind == "video" else None,
+        "vid": vid, "ref": f"{vid}:{kind}" if vid else f"path:{rel}",
+        "artist": artist, "album": album, "uploader": uploader, "upload_date": meta.get("upload_date"),
+        "year": meta.get("release_year"), "url": meta.get("webpage_url"),
+        "idx": int(mi.group(1)) if mi else None, "art": art,
+        "tv": hashlib.sha1(basis.encode()).hexdigest()[:10],
+        "chapters": json.dumps(ch) if ch else None,
+        "subs": 1 if vid and _sub_file(vid) else 0, "lyrics": lyrics,
+        "fstamp": fstamp, "mstamp": _meta_stamp(vid),
+    }
+
+
+def _collection_data(con: sqlite3.Connection, key: str, folders: dict) -> dict | None:
+    rows = [dict(r) for r in con.execute(
+        "SELECT name, title, idx, size, duration, mtime, vid, album, tv FROM files WHERE dir=?", (key,))]
+    if not rows:
+        return None
+    c = _collection_info(key)
+    extra = folders.get(key, {})
+    named = bool(extra.get("title")) and c["kind"] != "singles"
+    if named:
+        c["title"] = extra["title"]   # YouTube's original name, or the user's edit
+    if c["kind"] in ("album", "playlist"):
+        rows.sort(key=lambda f: (f["idx"] is None, f["idx"] or 0, f["title"].lower()))
+    else:
+        rows.sort(key=lambda f: -f["mtime"])
+    c.update(url=extra.get("url"), count=len(rows), size=sum(f["size"] for f in rows),
+             duration=sum(f["duration"] or 0 for f in rows), updated=max(f["mtime"] for f in rows),
+             first=rows[0]["name"], art=None, cover_url=None)
+    shown = rows
+    custom = _folder_cover(key, folders)
+    if custom:
+        c["art"] = custom[1]
+        if custom[0].parent == COVERS_DIR:
+            c["cover_url"] = f"/collection-cover/{custom[1]}"
+        else:   # an item's thumbnail: put that item first
+            shown = sorted(rows, key=lambda f: f["vid"] != custom[1])
+    c["covers"] = [{"name": f["name"], "tv": f["tv"]} for f in shown[:3]]
+    if c["kind"] == "album" and not named:
+        # real album name from tags ("Global Entry: Deluxe"), not the filename-safe folder
+        albums = [f["album"] for f in rows if f.get("album")]
+        if albums:
+            c["title"] = max(set(albums), key=albums.count)
+    return c
+
+
+def _index_captions(con: sqlite3.Connection, name: str, vid: str | None) -> None:
+    """(Re)index a video's captions for search, if they changed. Runs inside the
+    caller's transaction. A video's lines are stored together, so its old ones go
+    by rowid range (the text index can't look rows up by name)."""
+    sub = _sub_file(vid) if vid else None
+    stamp = ""
+    if sub:
+        st = sub.stat()
+        stamp = f"{sub.name}|{st.st_mtime_ns}|{st.st_size}"
+    row = con.execute("SELECT stamp, lo, hi FROM caption_state WHERE name=?", (name,)).fetchone()
+    if row is not None and row["stamp"] == stamp:
+        return
+    if row is None and not stamp:
+        con.execute("INSERT OR REPLACE INTO caption_state VALUES(?,?,NULL,NULL)", (name, ""))
+        return
+    if row is not None and row["lo"] is not None:
+        con.execute("DELETE FROM captions WHERE rowid BETWEEN ? AND ?", (row["lo"], row["hi"]))
+    segs = []
+    if sub:
         try:
-            st = os.stat(path)
-        except OSError:
-            continue   # moved away mid-scan
-        rel = path[base:].replace(os.sep, "/")
-        kind = "audio" if ext in AUDIO_EXTS else "video"
-        m = ID_RE.search(stem)
-        vid = by_path.get(rel) or (m.group(1) if m else None)
-        meta = _meta_cached(vid)
-        probe = _probe(path, st)
-        key = rel.rpartition("/")[0]
-        if key not in infos:
-            infos[key] = _collection_info(key) if key else {"section": "Other", "artist": None}
-        c = infos[key]
-        art = None
-        if c["section"] == "Music" and kind == "audio":
-            if key not in covers:
-                covers[key] = _folder_cover(key, folders)
-            art = covers[key][1] if covers[key] else None
-        m = INDEX_PREFIX_RE.match(fname)
-        refs[f"{vid}:{kind}" if vid else f"path:{rel}"] = rel
-        files.append({
-            "name": rel,
-            "title": meta.get("track") or meta.get("title") or _display_title(fname),
-            "kind": kind,
-            "size": st.st_size,
-            "mtime": st.st_mtime,
-            "duration": probe["duration"] or meta.get("duration"),
-            "height": probe["height"] if kind == "video" else None,
-            "section": c["section"],
-            "collection": key,
-            "id": vid,
-            "artist": meta.get("artist") or c.get("artist") or _clean_channel(meta.get("uploader")),
-            "album": meta.get("album"),
-            "uploader": _clean_channel(meta.get("uploader") or meta.get("channel")),
-            "upload_date": meta.get("upload_date"),
-            "year": meta.get("release_year"),
-            "url": meta.get("webpage_url"),
-            "index": int(m.group(1)) if m else None,
-            "art": art,
-            "chapters": _clean_chapters(meta),
-            "subs": bool(vid and vid in subs),
-            "lyrics": lyrics.get(vid) if vid and kind == "audio" else None,
-        })
-    files.sort(key=lambda f: f["mtime"], reverse=True)
-    _save_probe_cache()
-
-    collections: dict[str, dict] = {}
-    members_of: dict[str, list[dict]] = {}
-    for f in files:
-        if not f["collection"]:
-            continue
-        c = collections.get(f["collection"])
-        if c is None:
-            c = collections[f["collection"]] = _collection_info(f["collection"])
-            extra = folders.get(f["collection"], {})
-            if extra.get("title") and c["kind"] != "singles":
-                c["title"] = extra["title"]   # YouTube's original name, or the user's edit
-                c["named"] = True
-            c.update(url=extra.get("url"), count=0, size=0, duration=0.0, updated=0.0, covers=[])
-            members_of[f["collection"]] = []
-        members_of[f["collection"]].append(f)
-        c["count"] += 1
-        c["size"] += f["size"]
-        c["duration"] += f["duration"] or 0
-        c["updated"] = max(c["updated"], f["mtime"])
-    for c in collections.values():
-        members = members_of[c["key"]]
-        if c["kind"] in ("album", "playlist"):
-            members.sort(key=lambda f: (f["index"] is None, f["index"] or 0, f["title"].lower()))
-        custom = covers[c["key"]] if c["key"] in covers else _folder_cover(c["key"], folders)
-        if custom:
-            c["art"] = custom[1]
-            if custom[0].parent == COVERS_DIR:
-                c["cover_url"] = f"/collection-cover/{custom[1]}"
-            else:   # an item's thumbnail: put that item first
-                members.sort(key=lambda f: f["id"] != custom[1])   # stable: rest keep their order
-        c["covers"] = [f["name"] for f in members[:3]]
-        c.pop("named", None) if c["kind"] != "album" else None
-        if c["kind"] == "album" and not c.pop("named", False):
-            # real album name from tags ("Global Entry: Deluxe"), not the filename-safe folder
-            albums = [f["album"] for f in members if f.get("album")]
-            if albums:
-                c["title"] = max(set(albums), key=albums.count)
-    return files, sorted(collections.values(), key=lambda c: c["updated"], reverse=True), refs
+            segs = _parse_vtt(sub.read_text("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001
+            segs = []
+    rows = []
+    for k, sg in enumerate(segs):
+        # a line plus the start of the next, so phrases split across caption lines still match
+        nxt = " ".join(segs[k + 1]["text"].split()[:8]) if k + 1 < len(segs) else ""
+        rows.append(((sg["text"] + " " + nxt).strip(), name, sg["start"], k))
+    lo = hi = None
+    if rows:
+        top = con.execute("SELECT COALESCE(MAX(rowid), 0) FROM captions").fetchone()[0]
+        lo, hi = top + 1, top + len(rows)
+        con.executemany("INSERT INTO captions(rowid, text, name, start, i) VALUES(?,?,?,?,?)",
+                        [(lo + n, *r) for n, r in enumerate(rows)])
+    con.execute("INSERT OR REPLACE INTO caption_state VALUES(?,?,?,?)", (name, stamp, lo, hi))
 
 
-# The listing is rebuilt only when something changed (a folder in the library, or
-# a metadata write), at most once at a time; every poll in between gets the
-# same bytes, or "304 Not Modified" when the client already has them.
-_lib_lock = threading.Lock()
-_lib_snap: dict = {"stamp": None, "checked": 0.0, "built": 0.0, "files": [], "refs": {},
-                   "etag": "", "body": b"", "gz": b""}
+# -- reading the index
+
+_OUT_COLS = ("f.name, f.dir, f.section, f.kind, f.title, f.size, f.mtime, f.duration, f.height, f.vid, f.artist, "
+             "f.album, f.uploader, f.upload_date, f.year, f.url, f.idx, f.art, f.tv, f.subs, f.lyrics, k.color")
 
 
-def _library_snapshot() -> dict:
-    with _lib_lock:
-        snap, now = _lib_snap, time.monotonic()
-        if snap["etag"] and now - snap["checked"] < 1.0 and snap["stamp"][0] == _meta_gen:
-            return snap   # polled a moment ago and nothing was written since
-        stamp = (_meta_gen, _tree_stamp())
-        snap["checked"] = now
-        if snap["etag"] and stamp == snap["stamp"] and now - snap["built"] < 600:
-            return snap
-        files, collections, refs = _library()
-        body = json.dumps({"dir": str(DOWNLOAD_DIR), "files": files, "collections": collections,
-                           "playlists": _playlists_out()}, ensure_ascii=False, separators=(",", ":")).encode()
-        import gzip
-        snap.update(stamp=stamp, built=now, files=files, refs=refs, body=body, gz=gzip.compress(body, 6),
-                    etag=hashlib.sha1(body).hexdigest()[:20])
-        return snap
-
-
-def _progress_out(refs: dict[str, str]) -> dict:
-    """Resume positions by library name (only items that have one)."""
-    out = {}
-    for ref, p in _progress().items():
-        name = refs.get(ref)
-        if name and (p.get("pos") or p.get("watched")):
-            out[name] = {"pos": p.get("pos") or 0, "watched": bool(p.get("watched"))}
+def _file_out(r: sqlite3.Row, chapters: str | None = None) -> dict:
+    out = {
+        "name": r["name"], "title": r["title"], "kind": r["kind"], "size": r["size"], "mtime": r["mtime"],
+        "duration": r["duration"], "height": r["height"], "section": r["section"], "collection": r["dir"],
+        "id": r["vid"], "artist": r["artist"], "album": r["album"], "uploader": r["uploader"],
+        "upload_date": r["upload_date"], "year": r["year"], "url": r["url"], "index": r["idx"],
+        "art": r["art"], "tv": r["tv"], "color": r["color"], "subs": bool(r["subs"]), "lyrics": r["lyrics"],
+    }
+    if chapters is not None:
+        out["chapters"] = json.loads(chapters) if chapters else None
     return out
 
 
-def _cached_json(body: bytes, etag: str, gz: bytes | None = None) -> Response:
+def _rows_by_names(con: sqlite3.Connection, names: list[str]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for i in range(0, len(names), 500):
+        chunk = names[i:i + 500]
+        for r in con.execute(f"SELECT {_OUT_COLS} FROM files f LEFT JOIN colors k ON k.tv=f.tv "
+                             f"WHERE f.name IN ({','.join('?' * len(chunk))})", chunk):
+            out[r["name"]] = _file_out(r)
+    return out
+
+
+def _order_sql(kind: str) -> str:
+    return ("f.idx IS NULL, f.idx, f.sort_title" if kind in ("album", "playlist") else "f.mtime DESC")
+
+
+def _cached_json(body: bytes, etag: str | None = None, gz: bytes | None = None) -> Response:
+    """JSON with an ETag (the body's hash unless given): unchanged → 304, no body."""
+    etag = etag or hashlib.sha1(body).hexdigest()[:20]
     if request.if_none_match.contains(etag):
         resp = Response(status=304)
     else:
-        zipped = "gzip" in (request.headers.get("Accept-Encoding") or "")
+        zipped = "gzip" in (request.headers.get("Accept-Encoding") or "") and len(body) > 1024
         if zipped and gz is None:
             import gzip
-            gz = gzip.compress(body, 6)
+            gz = gzip.compress(body, 5)
         resp = Response(gz if zipped else body, mimetype="application/json")
         if zipped:
             resp.headers["Content-Encoding"] = "gzip"
@@ -1209,6 +1584,249 @@ def _cached_json(body: bytes, etag: str, gz: bytes | None = None) -> Response:
     resp.set_etag(etag)
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+def _json_bytes(data) -> bytes:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+_lib_cache: dict = {"key": None, "body": b"", "gz": b"", "etag": ""}
+
+
+@app.get("/api/library")
+def api_library():
+    """Collections (every album, channel, playlist folder) + totals: small enough to
+    send whole, so grids, artists and sorting work instantly on the device."""
+    key = _lib_version
+    c = _lib_cache
+    if c["key"] != key:
+        con = _db()
+        colors = dict(con.execute("SELECT tv, color FROM colors WHERE color IS NOT NULL").fetchall())
+        cols = []
+        for (data,) in con.execute("SELECT data FROM collections ORDER BY updated DESC"):
+            d = json.loads(data)
+            for cv in d["covers"]:
+                cv["color"] = colors.get(cv["tv"])
+            cols.append(d)
+        watched = dict(con.execute(
+            "SELECT f.dir, COUNT(*) FROM files f JOIN progress p ON p.ref=f.ref "
+            "WHERE p.watched=1 AND f.kind='video' AND f.dir!='' GROUP BY f.dir").fetchall())
+        stats = {"music": {"count": 0, "size": 0, "duration": 0, "audio": 0},
+                 "videos": {"count": 0, "size": 0, "duration": 0, "audio": 0}}
+        for r in con.execute("SELECT section='Music' AS m, COUNT(*), COALESCE(SUM(size),0), "
+                             "COALESCE(SUM(duration),0), SUM(kind='audio') FROM files GROUP BY m"):
+            stats["music" if r[0] else "videos"] = {"count": r[1], "size": r[2], "duration": r[3], "audio": r[4] or 0}
+        body = _json_bytes({"dir": str(DOWNLOAD_DIR), "ready": _indexer.ready.is_set(),
+                            "collections": cols, "watched": watched, "stats": stats})
+        import gzip
+        c.update(key=key, body=body, gz=gzip.compress(body, 5), etag=hashlib.sha1(body).hexdigest()[:20])
+    return _cached_json(c["body"], c["etag"], c["gz"])
+
+
+@app.get("/api/files")
+def api_files():
+    """Library files, filtered / sorted / paged in the database.
+    dir=<collection> · section=Music|videos · kind=audio|video · q=<words>
+    sort=new|old|title|size|long|auto · offset · limit · only=names"""
+    a = request.args
+    where, args = ["1=1"], []
+    d = a.get("dir")
+    if d is not None:
+        where.append("f.dir=?")
+        args.append(d)
+    if a.get("section") == "Music":
+        where.append("f.section='Music'")
+    elif a.get("section") == "videos":
+        where.append("f.section!='Music'")
+    if a.get("kind") in ("audio", "video"):
+        where.append("f.kind=?")
+        args.append(a["kind"])
+    for tok in (a.get("q") or "").casefold().split()[:8]:
+        where.append("f.search LIKE ? ESCAPE '\\'")
+        args.append("%" + tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+    sort = a.get("sort") or "auto"
+    orders = {"new": "f.mtime DESC", "old": "f.mtime ASC", "title": "f.sort_title", "size": "f.size DESC",
+              "long": "COALESCE(f.duration,0) DESC"}
+    order = orders.get(sort) or (_order_sql(_collection_info(d)["kind"]) if d else "f.mtime DESC")
+    w = " AND ".join(where)
+    con = _db()
+    if a.get("only") == "names":
+        names = [r[0] for r in con.execute(f"SELECT f.name FROM files f WHERE {w} ORDER BY {order}, f.name LIMIT 20000", args)]
+        return _cached_json(_json_bytes({"names": names}))
+    try:
+        limit = max(1, min(int(a.get("limit") or 60), 2000))
+        offset = max(0, int(a.get("offset") or 0))
+    except ValueError:
+        return jsonify(error="Bad paging."), 400
+    total = con.execute(f"SELECT COUNT(*) FROM files f WHERE {w}", args).fetchone()[0]
+    rows = con.execute(f"SELECT {_OUT_COLS} FROM files f LEFT JOIN colors k ON k.tv=f.tv WHERE {w} "
+                       f"ORDER BY {order}, f.name LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
+    return _cached_json(_json_bytes({"total": total, "files": [_file_out(r) for r in rows]}))
+
+
+@app.get("/api/watch/<path:name>")
+def api_watch(name: str):
+    """One file plus what plays around it: the rest of its playlist (?list=) or
+    album/collection, then the newest from the same section."""
+    con = _db()
+    r = con.execute(f"SELECT {_OUT_COLS}, f.chapters FROM files f LEFT JOIN colors k ON k.tv=f.tv WHERE f.name=?",
+                    (name,)).fetchone()
+    if r is None:
+        return jsonify(error="File not found."), 404
+    f = _file_out(r, r["chapters"] or "")
+    crow = con.execute("SELECT data FROM collections WHERE key=?", (f["collection"],)).fetchone() if f["collection"] else None
+    coll = json.loads(crow[0]) if crow else None
+    out: dict = {"file": f, "collection": coll, "playlist": None, "prev": None, "next": []}
+    pid = request.args.get("list")
+    pl = _pl_all().get(pid) if pid else None
+    if pl is not None:
+        idx = _index()
+        names = [n for n in (_pl_resolve(ref, idx) for ref in pl.get("items", [])) if n]
+        if name in names:
+            i = names.index(name)
+            rows = _rows_by_names(con, names[max(0, i - 1):i + 201])
+            out["playlist"] = {"id": pid, "title": pl.get("title") or "Untitled", "position": i, "total": len(names)}
+            out["next"] = [rows[n] for n in names[i + 1:i + 201] if n in rows]
+            out["prev"] = rows.get(names[i - 1]) if i > 0 else None
+            return _cached_json(_json_bytes(out))
+    after: list[dict] = []
+    if f["collection"]:
+        kind = coll["kind"] if coll else _collection_info(f["collection"])["kind"]
+        members = [x["name"] for x in con.execute(
+            f"SELECT f.name FROM files f WHERE f.dir=? ORDER BY {_order_sql(kind)}, f.name", (f["collection"],))]
+        i = members.index(name) if name in members else -1
+        want = members[i + 1:i + 25] + ([members[i - 1]] if i > 0 and kind in ("album", "playlist") else [])
+        rows = _rows_by_names(con, want)
+        after = [rows[n] for n in members[i + 1:i + 25] if n in rows]
+        if i > 0 and kind in ("album", "playlist"):
+            out["prev"] = rows.get(members[i - 1])
+    if len(after) < 24:
+        music = f["section"] == "Music"
+        rest = con.execute(
+            f"SELECT {_OUT_COLS} FROM files f LEFT JOIN colors k ON k.tv=f.tv WHERE f.dir!=? AND f.name!=? "
+            f"AND (f.section='Music')=? ORDER BY f.mtime DESC LIMIT ?",
+            (f["collection"], name, 1 if music else 0, 24 - len(after))).fetchall()
+        after += [_file_out(x) for x in rest]
+    out["next"] = after
+    return _cached_json(_json_bytes(out))
+
+
+@app.get("/api/random")
+def api_random():
+    """A random item from a collection (dir=), an artist (artist=) or one of your playlists (list=)."""
+    a, con = request.args, _db()
+    row = None
+    if a.get("dir"):
+        row = con.execute("SELECT name FROM files WHERE dir=? ORDER BY RANDOM() LIMIT 1", (a["dir"],)).fetchone()
+    elif a.get("artist"):
+        pat = "Music/" + a["artist"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
+        row = con.execute("SELECT name FROM files WHERE dir LIKE ? ESCAPE '\\' ORDER BY RANDOM() LIMIT 1", (pat,)).fetchone()
+    elif a.get("list"):
+        pl = _pl_all().get(a["list"])
+        if pl:
+            idx = _index()
+            names = [n for n in (_pl_resolve(ref, idx) for ref in pl.get("items", [])) if n]
+            if names:
+                import random
+                return jsonify(name=random.choice(names))
+    return jsonify(name=row[0] if row else None)
+
+
+@app.get("/api/events")
+def api_events():
+    """Server-sent events: library changes ("lib"), progress made on other devices
+    ("progress") and download status ("jobs"). Replaces polling."""
+    def stream():
+        with _bus:
+            last = _bus_seq
+        yield "retry: 3000\n\n"
+        yield f"event: lib\ndata: {json.dumps({'v': f'{_BOOT}-{_lib_version}'})}\n\n"
+        yield f"event: jobs\ndata: {_jobs_payload()}\n\n"
+        while True:
+            with _bus:
+                _bus.wait_for(lambda: _bus_seq > last, timeout=15)
+                seq = _bus_seq
+                pending = sorted([(s, k, d) for k, (s, d) in _bus_last.items() if s > last]
+                                 + [(s, "progress", d) for s, d in _bus_prog if s > last])
+                last = seq
+            if not pending:
+                yield ": ping\n\n"   # keeps proxies from closing an idle stream
+                continue
+            for _, kind, data in pending:
+                yield f"event: {kind}\ndata: {data}\n\n"
+    resp = Response(stream(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
+def _jobs_payload() -> str:
+    with _lock:
+        jobs = [serialize(j) for j in _jobs.values()]
+    jobs.sort(key=lambda j: j["created_at"], reverse=True)
+    return json.dumps(jobs, separators=(",", ":"))
+
+
+_jobs_dirty = threading.Event()
+
+
+def _jobs_publisher() -> None:
+    """Download progress changes many times a second; send it at most once a second."""
+    while True:
+        _jobs_dirty.wait()
+        _jobs_dirty.clear()
+        with _bus:
+            global _bus_seq
+            _bus_seq += 1
+            _bus_last["jobs"] = (_bus_seq, _jobs_payload())
+            _bus.notify_all()
+        time.sleep(1)
+
+
+_warming = threading.Lock()
+
+
+def warm_thumbs() -> None:
+    """Grid-sized copies + a placeholder colour for every thumbnail, ahead of time."""
+    if not _warming.acquire(blocking=False):
+        return
+    try:
+        _warm_thumbs()
+    finally:
+        _warming.release()
+
+
+def _warm_thumbs() -> None:
+    con = _db()
+    todo = con.execute("SELECT f.name, f.tv FROM files f LEFT JOIN colors k ON k.tv=f.tv "
+                       "WHERE k.tv IS NULL GROUP BY f.tv").fetchall()
+    done = 0
+    for r in todo:
+        path = DOWNLOAD_DIR / r["name"]
+        if not path.is_file():
+            continue
+        src = _thumb_image(path)
+        color = _small(src, color=True, background=True)[1] if src else None
+        con.execute("INSERT OR REPLACE INTO colors VALUES(?,?)", (r["tv"], color))
+        done += 1
+        if done % 200 == 0:
+            _lib_bump()
+    for p in [*COVERS_DIR.glob("*.jpg"), *PL_COVERS_DIR.glob("*.jpg")]:
+        _small(p)
+    if done:
+        _lib_bump()
+
+
+def _image_color(img: Path, background: bool = False) -> str | None:
+    """Average colour of an image, as #rrggbb (shown while the picture loads)."""
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(img), "-frames:v", "1",
+                              "-vf", "scale=1:1:flags=area", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+                             capture_output=True, timeout=15,
+                             preexec_fn=(lambda: os.nice(15)) if background else None).stdout
+        return "#" + out[:3].hex() if len(out) >= 3 else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _placeholder(audio: bool = False):
@@ -1237,49 +1855,67 @@ SMALL_W = 480                          # grid cards are ≤ 240 css px wide → 
 _small_slots = threading.Semaphore(2)  # don't let a fresh grid start 50 ffmpegs on the NAS
 
 
-def _small(src: Path) -> Path:
-    """A ≤ 480 px wide JPEG copy of `src` (made once, cached); `src` if it already is small."""
+def _small(src: Path, color: bool = False, background: bool = False):
+    """A ≤ 480 px wide JPEG copy of `src` (made once, cached); `src` if it already is
+    small. With `color`: (copy, average colour "#rrggbb") — one ffmpeg run for both."""
+    def done(path: Path, rgb: bytes | None = None):
+        if not color:
+            return path
+        return path, ("#" + rgb[:3].hex() if rgb and len(rgb) >= 3 else _image_color(path, background))
     try:
         st = src.stat()
     except OSError:
-        return src
+        return done(src, b"") if color else src
     if st.st_size < 30_000:
-        return src
+        return done(src)
     out = SMALL_DIR / (hashlib.sha1(f"{src}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:20] + ".jpg")
     if out.exists():
-        return out
+        return done(out)
     with _small_slots:
         if out.exists():
-            return out
+            return done(out)
         tmp = SMALL_DIR / f".{uuid.uuid4().hex}.jpg"
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(src), "-frames:v", "1",
+               "-vf", f"scale='min({SMALL_W},iw)':-2", "-q:v", "5", "-y", str(tmp)]
+        if color:   # second output: the picture shrunk to one averaged pixel
+            cmd += ["-frames:v", "1", "-vf", "scale=1:1:flags=area", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
         try:
-            subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(src), "-frames:v", "1",
-                            "-vf", f"scale='min({SMALL_W},iw)':-2", "-q:v", "5", "-y", str(tmp)],
-                           timeout=20, check=True, capture_output=True)
+            r = subprocess.run(cmd, timeout=20, check=True, capture_output=True,
+                               preexec_fn=(lambda: os.nice(15)) if background else None)
             if not tmp.stat().st_size:
                 raise OSError("empty")
             tmp.replace(out)
         except Exception:  # noqa: BLE001 — serve the original
             tmp.unlink(missing_ok=True)
-            return src
-    return out
+            return done(src)
+    return done(out, r.stdout if color else None)
 
 
 def _send_image(src: Path, max_age: int = 86400, mimetype: str | None = None):
-    """An image, grid-sized unless ?full=1."""
+    """An image, grid-sized unless ?full=1. Versioned URLs (?v=…) never change, so
+    browsers keep them for a year without asking again."""
     out = src if request.args.get("full") else _small(src)
-    return send_file(out, mimetype="image/jpeg" if out != src else mimetype, max_age=max_age)
+    resp = send_file(out, mimetype="image/jpeg" if out != src else mimetype, max_age=max_age)
+    if max_age >= 31536000:
+        resp.cache_control.immutable = True
+    return resp
 
 
-def warm_thumbs() -> None:
-    """Make the grid-sized copies ahead of time (after downloads, at startup)."""
-    srcs = [p for p in META_DIR.iterdir() if p.suffix.lower() in THUMB_EXTS]
-    srcs += [p for d in (COVERS_DIR, PL_COVERS_DIR) for p in d.iterdir() if p.suffix == ".jpg"]
-    for p in srcs:
-        _small(p)
+def _thumb_image(path: Path, own: bool = False) -> Path | None:
+    """The picture behind a file's thumbnail: the album cover you chose, YouTube's
+    thumbnail, embedded art, or a frame from the video."""
+    chosen = None if own else _chosen_cover(path)
+    yt = chosen[0] if chosen else _meta_thumb(_video_id(path))
+    if yt:
+        return yt
+    if path.suffix.lower() in AUDIO_EXTS:
+        return _embedded_art(path)
+    st = path.stat()
+    out = THUMBS_DIR / (hashlib.sha1(f"{_rel(path)}|{int(st.st_mtime)}".encode()).hexdigest()[:16] + ".jpg")
+    if not out.exists():
+        _generate_thumb(path, out)
+    return out if out.exists() else None
 
-
-# ---------------------------------------------------------------- migration
 
 def _embed_cover(path: Path, jpg: Path) -> None:
     """Replace the embedded cover of an .m4a with `jpg`."""
@@ -1555,10 +2191,9 @@ def _startup() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"[tubegrab] backfill failed: {exc}")
     backfill_lyrics()
+    _indexer.ready.wait()
     warm_thumbs()
 
-
-threading.Thread(target=_startup, daemon=True, name="migrate").start()
 
 
 # ---------------------------------------------------------------- API
@@ -1590,6 +2225,7 @@ def api_download():
     }
     with _lock:
         _jobs[job_id] = job
+    _jobs_dirty.set()
     threading.Thread(target=_run_job, args=(job_id, url, fmt, playlist), daemon=True).start()
     return jsonify(job=serialize(job))
 
@@ -1611,12 +2247,6 @@ def api_cancel(job_id: str):
         if job["status"] in ("queued", "downloading"):
             job["cancel"] = True
     return jsonify(ok=True)
-
-
-@app.get("/api/files")
-def api_files():
-    snap = _library_snapshot()
-    return _cached_json(snap["body"], snap["etag"], snap["gz"])
 
 
 @app.post("/api/files/delete")
@@ -1699,13 +2329,18 @@ def _ts(v: str) -> float:
     return int(h or 0) * 3600 + int(mi) * 60 + int(se) + int(ms) / 1000
 
 
+_CUE_SPLIT = re.compile(r"\n\s*\n")
+_TAG = re.compile(r"<[^>]+>")
+_WS = re.compile(r"\s+")
+
+
 def _parse_vtt(text: str) -> list[dict]:
     """Cues → [{start, end, text}], collapsing YouTube's rolling auto-captions
     (each cue repeats the previous line) into one entry per spoken line."""
     import html
     segs: list[dict] = []
     last: list[str] = []
-    for block in re.split(r"\n\s*\n", text.replace("\r", "")):
+    for block in _CUE_SPLIT.split(text.replace("\r", "")):
         lines = block.strip().split("\n")
         i = next((k for k, l in enumerate(lines) if "-->" in l), None)
         if i is None:
@@ -1714,8 +2349,15 @@ def _parse_vtt(text: str) -> list[dict]:
         start, end = _ts(a), _ts(b.split()[0] if b.split() else b)
         if end - start < 0.05:          # zero-length "transition" cues
             continue
-        body = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", l))).strip() for l in lines[i + 1:]]
-        body = [l for l in body if l]
+        body = []
+        for l in lines[i + 1:]:
+            if "<" in l:
+                l = _TAG.sub("", l)
+            if "&" in l:
+                l = html.unescape(l)
+            l = _WS.sub(" ", l).strip()
+            if l:
+                body.append(l)
         new = [l for l in body if l not in last]
         if new:
             segs.append({"start": round(start, 2), "end": round(end, 2), "text": " ".join(new)})
@@ -1748,6 +2390,8 @@ def _transcript(vid: str | None) -> list[dict]:
     except Exception:  # noqa: BLE001
         segs = []
     _transcripts[str(path)] = (mtime, segs)
+    while len(_transcripts) > 16:   # only the few being watched; search uses the index
+        _transcripts.pop(next(iter(_transcripts)))
     return segs
 
 
@@ -1761,26 +2405,37 @@ def api_transcript(name: str):
 
 @app.get("/api/search")
 def api_search():
-    """Find words spoken in your videos (their captions)."""
-    q = re.sub(r"\s+", " ", (request.args.get("q") or "")).strip().casefold()
-    if len(q) < 3:
+    """Find words spoken in your videos (full-text index of their captions)."""
+    q = re.sub(r"\s+", " ", request.args.get("q") or "").strip()
+    terms = re.findall(r"\w+", q)
+    if len(q) < 3 or not terms:
         return jsonify(results=[])
-    by_path = _ids_by_path()
+    match = '"' + " ".join(terms) + '"' + ("" if q.endswith(" ") else "*")
+    con = _db()
+    try:
+        # one pass over the matches (capped, so a word said everywhere stays quick)
+        rows = con.execute("SELECT name, start, text, i FROM captions WHERE captions MATCH ? LIMIT 20000",
+                           (match,)).fetchall()
+    except sqlite3.OperationalError:
+        return jsonify(results=[])
+    per: dict[str, list] = {}
+    for r in rows:
+        per.setdefault(r["name"], []).append(r)
+    top = sorted(per, key=lambda n: -len(per[n]))[:30]
+    files = _rows_by_names(con, top)
     results = []
-    for path in _iter_media():
-        if path.suffix.lower() not in VIDEO_EXTS:
+    for name in top:
+        if name not in files:
             continue
-        segs = _transcript(_video_id(path, by_path))
-        hits, last_hit = [], -10
-        for k, sg in enumerate(segs):
-            window = (sg["text"] + " " + (segs[k + 1]["text"] if k + 1 < len(segs) else "")).casefold()
-            if q in window and k > last_hit + 1:
-                hits.append({"t": sg["start"], "text": sg["text"] + (" " + segs[k + 1]["text"] if k + 1 < len(segs) and q not in sg["text"].casefold() else "")})
-                last_hit = k
-        if hits:
-            results.append({"name": _rel(path), "count": len(hits), "hits": hits[:3]})
-    results.sort(key=lambda r: -r["count"])
-    return jsonify(results=results[:30])
+        hits, last = [], -10
+        for h in sorted(per[name], key=lambda r: r["i"]):
+            if h["i"] > last + 1:   # the next line repeats this one's tail
+                hits.append({"t": h["start"], "text": h["text"]})
+                if len(hits) == 3:
+                    break
+            last = h["i"]
+        results.append({"name": name, "count": len(per[name]), "hits": hits, "file": files[name]})
+    return jsonify(results=results)
 
 
 # ---------------------------------------------------------------- lyrics
@@ -1879,7 +2534,7 @@ def fetch_lyrics(path: Path, force: bool = False) -> str | None:
         p.unlink(missing_ok=True)
     if not rec or rec.get("instrumental") or not (rec.get("plainLyrics") or rec.get("syncedLyrics")):
         miss.write_text(_now())
-        _meta_changed()
+        _meta_changed(walk=False, vids=[vid])
         return None
     # synced lines only line up when it's the same recording (music videos often add intros)
     same_cut = not dur or abs((rec.get("duration") or 0) - dur) <= 3
@@ -1891,7 +2546,7 @@ def fetch_lyrics(path: Path, force: bool = False) -> str | None:
         txt.write_text(plain, "utf-8")
         kind = "plain"
     _embed_lyrics(path, plain)
-    _meta_changed()
+    _meta_changed(walk=False, vids=[vid])
     return kind
 
 
@@ -1957,16 +2612,10 @@ def _progress() -> dict:
 
 @app.get("/api/progress")
 def api_progress_get():
-    snap = _library_snapshot()
-    try:
-        mt = PROGRESS_FILE.stat().st_mtime_ns
-    except OSError:
-        mt = 0
-    etag = f"{snap['etag']}-{mt}"
-    if request.if_none_match.contains(etag):
-        return _cached_json(b"", etag)
-    body = json.dumps(_progress_out(snap["refs"]), separators=(",", ":")).encode()
-    return _cached_json(body, etag)
+    """Resume positions + watched flags, by library name (only items that have one)."""
+    rows = _db().execute("SELECT f.name, p.pos, p.watched FROM progress p JOIN files f ON f.ref=p.ref "
+                         "WHERE p.pos>0 OR p.watched=1").fetchall()
+    return _cached_json(_json_bytes({r[0]: {"pos": r[1], "watched": bool(r[2])} for r in rows}))
 
 
 @app.post("/api/progress")
@@ -1991,6 +2640,13 @@ def api_progress():
         entry["at"] = _now()
         prog[ref] = entry
         _write_json(PROGRESS_FILE, prog)
+    con = _db()
+    old = con.execute("SELECT watched FROM progress WHERE ref=?", (ref,)).fetchone()
+    con.execute("INSERT OR REPLACE INTO progress VALUES(?,?,?)",
+                (ref, float(entry.get("pos") or 0), 1 if entry.get("watched") else 0))
+    _publish("progress", {"name": _rel(path), "pos": entry.get("pos") or 0, "watched": bool(entry.get("watched"))})
+    if bool(old and old[0]) != bool(entry.get("watched")):
+        _lib_bump()   # watched counts on collection cards
     return jsonify(ok=True)
 
 
@@ -2013,21 +2669,55 @@ def _pl_resolve(ref: str, idx: dict) -> str | None:
     return rel if rel and (DOWNLOAD_DIR / rel).is_file() else None
 
 
-def _pl_out(pid: str, p: dict, idx: dict) -> dict:
-    items = [r for r in (_pl_resolve(ref, idx) for ref in p.get("items", [])) if r]
+def _tile(f: dict) -> dict:
+    return {"name": f["name"], "tv": f["tv"], "color": f["color"], "kind": f["kind"]}
+
+
+def _pl_out(pid: str, p: dict, idx: dict, full: bool = False) -> dict:
+    names = [r for r in (_pl_resolve(ref, idx) for ref in p.get("items", [])) if r]
+    rows = _rows_by_names(_db(), names)
+    files = [rows[n] for n in names if n in rows]
     cover = p.get("cover") or {}
-    return {
+    cover_item = _pl_resolve(cover["item"], idx) if cover.get("item") else None
+    seen: set = set()
+    mosaic = []   # one tile per album (its tracks share the art), every video its own
+    for f in files:
+        k = f["collection"] if f["section"] == "Music" and f["collection"] else f["name"]
+        if k not in seen:
+            seen.add(k)
+            mosaic.append(_tile(f))
+            if len(mosaic) == 4:
+                break
+    out = {
         "id": pid, "title": p.get("title") or "Untitled", "description": p.get("description") or "",
-        "items": items, "created": p.get("created"), "updated": p.get("updated"),
-        "cover_item": _pl_resolve(cover["item"], idx) if cover.get("item") else None,
+        "items": [f["name"] for f in files], "created": p.get("created"), "updated": p.get("updated"),
+        "count": len(files), "duration": sum(f["duration"] or 0 for f in files),
+        "cover_item": cover_item, "cover_tile": _tile(rows[cover_item]) if cover_item in rows else None,
         "cover_upload": cover.get("upload"),   # version string → /playlist-cover/<id>?v=
+        "mosaic": mosaic,
     }
+    if full:
+        out["files"] = files
+    return out
 
 
 def _playlists_out() -> list[dict]:
     idx = _index()
     out = [_pl_out(pid, p, idx) for pid, p in _pl_all().items()]
     return sorted(out, key=lambda p: p["updated"] or "", reverse=True)
+
+
+@app.get("/api/playlists")
+def api_playlists():
+    return _cached_json(_json_bytes({"playlists": _playlists_out()}))
+
+
+@app.get("/api/playlists/<pid>")
+def api_playlist(pid: str):
+    p = _pl_all().get(pid)
+    if p is None:
+        return jsonify(error="Playlist not found."), 404
+    return _cached_json(_json_bytes({"playlist": _pl_out(pid, p, _index(), full=True)}))
 
 
 def _playlists_drop_missing() -> None:
@@ -2187,7 +2877,7 @@ def playlist_cover(pid: str):
     path = PL_COVERS_DIR / f"{pid}.jpg"
     if not path.exists():
         return jsonify(error="Not found."), 404
-    return _send_image(path, mimetype="image/jpeg")
+    return _send_image(path, 31536000 if request.args.get("v") else 86400, "image/jpeg")
 
 
 @app.post("/api/collections/cover")
@@ -2321,6 +3011,27 @@ def api_collection_edit():
 
 # ---------------------------------------------------------------- media
 
+def _file_body(f, length: int):
+    """`length` bytes of an open file from its current position. Under gunicorn the
+    kernel copies them straight to the socket (sendfile, bounded by Content-Length);
+    elsewhere they are streamed in chunks. Either way nothing big sits in memory."""
+    if request.environ.get("SERVER_SOFTWARE", "").startswith("gunicorn"):
+        return wrap_file(request.environ, f, buffer_size=256 * 1024)
+
+    def chunks():
+        left = length
+        try:
+            while left > 0:
+                data = f.read(min(256 * 1024, left))
+                if not data:
+                    break
+                left -= len(data)
+                yield data
+        finally:
+            f.close()
+    return chunks()
+
+
 @app.get("/media/<path:name>")
 def media(name: str):
     """Stream a library file with HTTP Range support so seeking works."""
@@ -2333,29 +3044,26 @@ def media(name: str):
         mime = "audio/mp4"
 
     m = re.match(r"^bytes=(\d*)-(\d*)$", request.headers.get("Range", "").strip())
+    start, end, status = 0, size - 1, 200
     if m and (m.group(1) or m.group(2)):
         if m.group(1):                      # bytes=start-  /  bytes=start-end
             start = int(m.group(1))
-            end = int(m.group(2)) if m.group(2) else min(start + 8 * 1024 * 1024, size - 1)
+            end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
         else:                               # suffix range: bytes=-N (last N bytes)
             start = max(size - int(m.group(2)), 0)
-            end = size - 1
-        end = min(end, size - 1)
         if start >= size or start > end:
             resp = Response(status=416)
             resp.headers["Content-Range"] = f"bytes */{size}"
             return resp
-        with path.open("rb") as f:
-            f.seek(start)
-            data = f.read(end - start + 1)
-        resp = Response(data, 206, mimetype=mime)
+        status = 206
+    length = end - start + 1
+    f = path.open("rb")
+    f.seek(start)
+    resp = Response(_file_body(f, length), status, mimetype=mime, direct_passthrough=True)
+    resp.headers["Content-Length"] = str(length)
+    if status == 206:
         resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    else:
-        # full file: stream through in chunks without loading it into memory
-        resp = Response(wrap_file(request.environ, path.open("rb")),
-                        mimetype=mime, direct_passthrough=True)
-        resp.headers["Content-Length"] = str(size)
-        resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Cache-Control"] = "no-cache"
     resp.headers["Accept-Ranges"] = "bytes"
     resp.headers["Content-Disposition"] = "inline"
     return resp
@@ -2367,21 +3075,10 @@ def thumb(name: str):
     path = _safe_path(name)
     if path is None:
         return jsonify(error="File not found."), 404
-    chosen = None if request.args.get("own") else _chosen_cover(path)
-    yt = chosen[0] if chosen else _meta_thumb(_video_id(path))
-    if yt:
-        return _send_image(yt)
-    if path.suffix.lower() in AUDIO_EXTS:
-        art = _embedded_art(path)
-        return _send_image(art, mimetype="image/jpeg") if art else _placeholder(audio=True)
-    st = path.stat()
-    key = hashlib.sha1(f"{name}|{int(st.st_mtime)}".encode()).hexdigest()[:16]
-    out = THUMBS_DIR / f"{key}.jpg"
-    if not out.exists():
-        _generate_thumb(path, out)
-    if out.exists():
-        return send_file(out, mimetype="image/jpeg", max_age=86400)
-    return _placeholder()
+    src = _thumb_image(path, own=bool(request.args.get("own")))
+    if src is None:
+        return _placeholder(audio=path.suffix.lower() in AUDIO_EXTS)
+    return _send_image(src, 31536000 if request.args.get("v") else 86400)
 
 
 # ---------------------------------------------------------------- UI
@@ -2409,3 +3106,9 @@ if __name__ == "__main__":
         debug=False,
         threaded=True,
     )
+
+
+# ---------------------------------------------------------------- background threads
+threading.Thread(target=_indexer.run, daemon=True, name="indexer").start()
+threading.Thread(target=_jobs_publisher, daemon=True, name="jobs-events").start()
+threading.Thread(target=_startup, daemon=True, name="migrate").start()

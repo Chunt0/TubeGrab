@@ -11,9 +11,9 @@ export function Thumb({ file, className, eager }: { file: LibraryFile; className
   const p = resumable(file) ? progress[file.name] : undefined;
   const frac = p && !p.watched && file.duration ? Math.min(1, p.pos / file.duration) : 0;
   return (
-    <div className={cx("relative overflow-hidden bg-surface", className)}>
+    <div className={cx("relative overflow-hidden bg-surface", className)} style={file.color ? { backgroundColor: file.color } : undefined}>
       <img
-        src={thumbUrl(file.name, file.art)}
+        src={thumbUrl(file.name, file.tv)}
         alt=""
         loading={eager ? "eager" : "lazy"}
         decoding="async"

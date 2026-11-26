@@ -4,8 +4,6 @@ import {
   SkipBack, SkipForward, Volume1, Volume2, VolumeX,
 } from "lucide-react";
 import { usePlayer } from "../player";
-import { useStore } from "../store";
-import { upNextFor } from "../api";
 import { cx, duration } from "../lib/format";
 import { chapterAt, segmentAt, useTranscript } from "../lib/transcript";
 import { useMediaState } from "../lib/media";
@@ -47,7 +45,6 @@ export function PlayerStage({ music }: { music: boolean }) {
   const [cc, setCcState] = useState(() => { try { return localStorage.getItem(CC_KEY) === "1"; } catch { return false; } });
   const setCc = useCallback((v: boolean) => { setCcState(v); try { localStorage.setItem(CC_KEY, v ? "1" : "0"); } catch { /* ok */ } }, []);
   const [speedOpen, setSpeedOpen] = useState(false);
-  const { files, collections, playlists } = useStore();
   const ms = useMediaState(el);
   const stage = useRef<HTMLDivElement>(null);
   const slot = useRef<HTMLDivElement>(null);
@@ -62,8 +59,7 @@ export function PlayerStage({ music }: { music: boolean }) {
   const hideT = useRef(0), streakT = useRef(0), flashT = useRef(0);
   const lastTap = useRef({ t: 0, x: 0, mouse: false });
 
-  const pl = playlists.find((p) => p.id === player.list) ?? null;
-  const hasNext = !!file && upNextFor(file, files, collections, pl).length > 0;
+  const { hasNext } = player;
   const shown = active || ms.paused || drag != null || speedOpen;
   const canPip = file?.kind === "video" && document.pictureInPictureEnabled;
 

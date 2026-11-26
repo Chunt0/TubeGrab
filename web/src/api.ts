@@ -46,14 +46,22 @@ export interface LibraryFile {
   url: string | null;
   /** track / playlist position (from the "NN - " filename prefix) */
   index: number | null;
-  /** album cover chosen for this track's album (cache key for its thumbnail) */
+  /** album cover chosen for this track's album */
   art?: string | null;
+  /** thumbnail version: thumbnail URLs carry it, so browsers can keep them forever */
+  tv: string;
+  /** average colour of the thumbnail, shown while it loads */
+  color?: string | null;
+  /** only from /api/watch */
   chapters?: Chapter[] | null;
   /** song lyrics found: line-synced, or plain text */
   lyrics?: "synced" | "plain" | null;
   /** English captions available (CC, transcript, search) */
   subs?: boolean;
 }
+
+/** Enough of a file to draw its thumbnail. */
+export interface Tile { name: string; tv: string; color?: string | null; kind?: "video" | "audio" }
 
 export interface Collection {
   key: string;
@@ -67,16 +75,43 @@ export interface Collection {
   size: number;
   duration: number;
   updated: number;
-  covers: string[];
-  /** cache token of a custom cover (a chosen item → covers[0] is that item) */
+  /** first item in play order */
+  first: string;
+  /** up to three items for the cover (a chosen cover item comes first) */
+  covers: Tile[];
+  /** token of a custom cover (a chosen item, or an uploaded picture) */
   art?: string | null;
   /** an uploaded picture, when there is one */
   cover_url?: string | null;
 }
 
+export interface Stat { count: number; size: number; duration: number; audio: number }
+
+/** Everything small enough to keep on the device: all collections + totals. */
+export interface Library {
+  dir: string;
+  /** false while the server is still building its index for the first time */
+  ready: boolean;
+  collections: Collection[];
+  /** watched videos per collection */
+  watched: Record<string, number>;
+  stats: { music: Stat; videos: Stat };
+}
+
+export interface Page { total: number; files: LibraryFile[] }
+
+export interface WatchData {
+  file: LibraryFile;
+  collection: Collection | null;
+  playlist: { id: string; title: string; position: number; total: number } | null;
+  prev: LibraryFile | null;
+  /** what plays next, in order */
+  next: LibraryFile[];
+}
+
 export interface Chapter { start: number; title: string }
 export interface Segment { start: number; end: number; text: string }
-export interface SearchResult { name: string; count: number; hits: { t: number; text: string }[] }
+export interface SearchResult { name: string; count: number; hits: { t: number; text: string }[]; file: LibraryFile }
 
 /** One of your own playlists: an ordered list of library items (no copies). */
 export interface Playlist {
@@ -85,36 +120,31 @@ export interface Playlist {
   description: string;
   /** library names, in playlist order */
   items: string[];
+  count: number;
+  duration: number;
   created: string;
   updated: string;
   /** item whose thumbnail is the cover, or a version of an uploaded picture; neither → mosaic */
   cover_item: string | null;
+  cover_tile: Tile | null;
   cover_upload: string | null;
+  mosaic: Tile[];
+  /** only from /api/playlists/<id> */
+  files?: LibraryFile[];
 }
 
 export type PlaylistPatch = Partial<{ title: string; description: string; items: string[]; cover_item: string | null }>;
 
+export class HttpError extends Error {
+  constructor(message: string, public status: number) { super(message); }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, init);
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || r.statusText || "Request failed");
+  if (!r.ok) throw new HttpError(body.error || r.statusText || "Request failed", r.status);
   return body as T;
 }
-
-/** GET that returns null when the server says nothing changed since `etag`. */
-const etags = new Map<string, string>();
-async function fresh<T>(path: string): Promise<T | null> {
-  const tag = etags.get(path);
-  const r = await fetch(path, { headers: tag ? { "If-None-Match": tag } : {}, cache: "no-store" });
-  if (r.status === 304) return null;
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || r.statusText || "Request failed");
-  const next = r.headers.get("ETag");
-  if (next) etags.set(path, next);
-  return body as T;
-}
-/** the next fresh() of `path` downloads it again */
-export const forgetEtag = (path: string) => etags.delete(path);
 
 const post = (body: unknown): RequestInit => ({
   method: "POST",
@@ -122,12 +152,28 @@ const post = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
+export const encPath = (name: string) => name.split("/").map(encodeURIComponent).join("/");
+const qs = (params: Record<string, string | number | null | undefined>) => {
+  const s = Object.entries(params).filter(([, v]) => v != null && v !== "")
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
+  return s ? `?${s}` : "";
+};
+
+/** Query URLs (fetched through lib/cache, so they're cached on the device). */
+export const urls = {
+  library: "/api/library",
+  playlists: "/api/playlists",
+  progress: "/api/progress",
+  playlist: (id: string) => `/api/playlists/${encodeURIComponent(id)}`,
+  watch: (name: string, list?: string | null) => `/api/watch/${encPath(name)}${qs({ list })}`,
+  files: (p: { dir?: string; section?: "Music" | "videos"; kind?: string; q?: string; sort?: string }) => `/api/files${qs(p)}`,
+};
+
 export const api = {
   jobs: () => req<{ jobs: Job[] }>("/api/jobs").then((r) => r.jobs),
-  /** null: unchanged since the last call */
-  files: () => fresh<{ dir: string; files: LibraryFile[]; collections: Collection[]; playlists: Playlist[] }>("/api/files"),
-  /** resume position + watched by library name; null: unchanged */
-  progressAll: () => fresh<Record<string, { pos: number; watched: boolean }>>("/api/progress"),
+  names: (dir: string) => req<{ names: string[] }>(`/api/files${qs({ dir, only: "names" })}`).then((r) => r.names),
+  random: (scope: { dir?: string; artist?: string; list?: string }) =>
+    req<{ name: string | null }>(`/api/random${qs(scope)}`).then((r) => r.name),
   createPlaylist: (title: string, items: string[] = [], description = "") =>
     req<{ playlist: Playlist }>("/api/playlists", post({ title, items, description })).then((r) => r.playlist),
   updatePlaylist: (id: string, patch: PlaylistPatch) =>
@@ -140,7 +186,7 @@ export const api = {
   lyrics: (name: string) => req<{ synced: Segment[] | null; plain: string | null }>(`/api/lyrics/${encPath(name)}`),
   findLyrics: (name: string) => req<{ found: "synced" | "plain" | null }>(`/api/lyrics/${encPath(name)}`, { method: "POST" }).then((r) => r.found),
   transcript: (name: string) => req<{ segments: Segment[] }>(`/api/transcript/${encPath(name)}`).then((r) => r.segments),
-  search: (q: string) => req<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}`).then((r) => r.results),
+  search: (q: string) => req<{ results: SearchResult[] }>(`/api/search${qs({ q })}`).then((r) => r.results),
   uploadPlaylistCover: (id: string, file: File) => {
     const body = new FormData();
     body.append("file", file);
@@ -162,75 +208,17 @@ export const api = {
     req<{ key: string }>("/api/collections/edit", post({ key, ...fields })).then((r) => r.key),
 };
 
-const encPath = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 export const mediaUrl = (name: string) => `/media/${encPath(name)}`;
-/** `v` busts the browser cache when an album's chosen cover changes; `own` skips it. */
-export const thumbUrl = (name: string, v?: string | null, full = false) => {
-  const q = [v && `v=${encodeURIComponent(v)}`, full && "full=1"].filter(Boolean).join("&");
-  return `/thumb/${encPath(name)}${q ? `?${q}` : ""}`;
-};
-export const ownThumbUrl = (name: string) => `/thumb/${encPath(name)}?own=1`;
+/** `v` (the thumbnail version) makes the URL permanent: browsers keep it without asking again. */
+export const thumbUrl = (name: string, v?: string | null, full = false) => `/thumb/${encPath(name)}${qs({ v, full: full ? 1 : null })}`;
+export const ownThumbUrl = (name: string, v?: string | null) => `/thumb/${encPath(name)}${qs({ own: 1, v })}`;
 export const isActive = (j: Job) => j.status === "queued" || j.status === "downloading";
-
-/** Track/playlist order for albums and playlists, newest first otherwise. */
-export function collectionOrder(c: Collection | undefined, files: LibraryFile[]): LibraryFile[] {
-  const out = [...files];
-  if (c && (c.kind === "album" || c.kind === "playlist")) {
-    return out.sort((a, b) => (a.index ?? 1e9) - (b.index ?? 1e9) || a.title.localeCompare(b.title));
-  }
-  return out.sort((a, b) => b.mtime - a.mtime);
-}
-
-export const filesIn = (key: string, files: LibraryFile[]) => files.filter((f) => f.collection === key);
-export const isMusic = (f: LibraryFile) => f.section === "Music";
-
-/** What plays after `file`: rest of its collection (in order), then the rest of
- *  the same section (music keeps playing music), newest first. */
-export function queueFor(file: LibraryFile, files: LibraryFile[], collections: Collection[]): LibraryFile[] {
-  const coll = collections.find((c) => c.key === file.collection);
-  const inColl = file.collection ? collectionOrder(coll, filesIn(file.collection, files)) : [];
-  const i = inColl.findIndex((f) => f.name === file.name);
-  const after = i >= 0 ? inColl.slice(i + 1) : [];
-  const music = isMusic(file);
-  const rest = files
-    .filter((f) => f.collection !== file.collection && f.name !== file.name && isMusic(f) === music)
-    .sort((a, b) => b.mtime - a.mtime);
-  return [...after, ...rest];
-}
-
-/** The item before `file` in its album / playlist (what "previous" goes to). */
-export function prevInCollection(file: LibraryFile, files: LibraryFile[], collections: Collection[]): LibraryFile | null {
-  const coll = collections.find((c) => c.key === file.collection);
-  if (!coll || (coll.kind !== "album" && coll.kind !== "playlist")) return null;
-  const order = collectionOrder(coll, filesIn(file.collection, files));
-  const i = order.findIndex((f) => f.name === file.name);
-  return i > 0 ? order[i - 1] : null;
-}
 
 export const playlistCoverUrl = (p: Playlist) => `/playlist-cover/${p.id}?v=${p.cover_upload}`;
 
-/** A playlist's items that still exist, in order. */
-export function playlistFiles(p: Playlist, files: LibraryFile[]): LibraryFile[] {
-  const by = new Map(files.map((f) => [f.name, f]));
-  return p.items.map((n) => by.get(n)).filter((f): f is LibraryFile => !!f);
-}
-
-/** Next / previous inside a playlist (no wrap-around). */
-export function playlistNeighbours(p: Playlist, file: LibraryFile, files: LibraryFile[]) {
-  const items = playlistFiles(p, files);
-  const i = items.findIndex((f) => f.name === file.name);
-  return { after: i >= 0 ? items.slice(i + 1) : items, before: i > 0 ? items[i - 1] : null, position: i };
-}
-
-/** What plays after `file`: inside a playlist, the rest of it; otherwise its album/collection, then the section. */
-export function upNextFor(file: LibraryFile, files: LibraryFile[], collections: Collection[], playlist?: Playlist | null) {
-  if (playlist && playlist.items.includes(file.name)) return playlistNeighbours(playlist, file, files).after;
-  return queueFor(file, files, collections);
-}
-
 /** A collection's main picture: uploaded, else its (chosen or first) item's thumbnail. */
 export const collectionCoverUrl = (c: Collection) =>
-  c.cover_url ?? (c.covers[0] ? thumbUrl(c.covers[0], c.art) : null);
+  c.cover_url ?? (c.covers[0] ? thumbUrl(c.covers[0].name, c.covers[0].tv) : null);
 
 /** Long-form items remember where you stopped (not 3-minute songs). */
-export const resumable = (f: LibraryFile) => f.kind === "video" || (f.duration ?? 0) > 600;
+export const resumable = (f: Pick<LibraryFile, "kind" | "duration">) => f.kind === "video" || (f.duration ?? 0) > 600;

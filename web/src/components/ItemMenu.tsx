@@ -12,7 +12,7 @@ export function ItemMenu({ file, className }: { file: LibraryFile; className?: s
     <Menu className={cx("opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100", className)}>
       {(close) => (
         <>
-          <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist([file.name]); }}>Add to playlist…</MenuItem>
+          <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist([file.name], file.title); }}>Add to playlist…</MenuItem>
           {resumable(file) && (
             <MenuItem icon={watched ? RotateCcw : CheckCheck} onClick={() => { close(); setWatched(file, !watched).catch(() => {}); }}>
               {watched ? "Mark as unwatched" : "Mark as watched"}

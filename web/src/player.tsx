@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Maximize2, Pause, Play, SkipBack, SkipForward, X } from "lucide-react";
-import { api, mediaUrl, playlistNeighbours, prevInCollection, resumable, thumbUrl, upNextFor, type LibraryFile } from "./api";
+import { HttpError, api, mediaUrl, resumable, thumbUrl, urls, type LibraryFile, type WatchData } from "./api";
 import { useStore } from "./store";
+import { fetchQuery, useQuery } from "./lib/cache";
 import { useRouter, watchPath } from "./router";
 import { cleanChannel, cx, duration } from "./lib/format";
 import { useMediaState } from "./lib/media";
@@ -22,6 +23,7 @@ interface PlayerCtx {
   /** next in queue / previous (restart if >3s in, else album order, else history) */
   next: () => void;
   prev: () => void;
+  hasNext: boolean;
   /** playlist being played through (its order drives next/previous), if any */
   list: string | null;
   setList: (id: string | null) => void;
@@ -55,7 +57,7 @@ function createMedia(): HTMLVideoElement {
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
-  const { files, collections, filesLoaded, playlists, progress, noteProgress, setWatched } = useStore();
+  const { progress, noteProgress, setWatched } = useStore();
   const [speed, setSpeedState] = useState(readSpeed);
   const [list, setListState] = useState<string | null>(null);
   const { navigate } = useRouter();
@@ -66,11 +68,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const parking = useRef<HTMLDivElement>(null);
   const slotRef = useRef<HTMLElement | null>(null);
 
+  // what plays around the current file (shared with the Watch page through the cache)
+  const queueUrl = file ? urls.watch(file.name, list) : null;
+  const { data: queueData, error: queueError } = useQuery<WatchData>(queueUrl);
+  const queue = queueData && queueData.file.name === file?.name ? queueData : null;
+
   // latest values for event handlers
-  const live = useRef({ file, mode, autoplay, files, collections, list, playlists, progress, speed });
-  live.current = { file, mode, autoplay, files, collections, list, playlists, progress, speed };
+  const live = useRef({ file, mode, autoplay, list, progress, speed, queue });
+  live.current = { file, mode, autoplay, list, progress, speed, queue };
   const setList = useCallback((id: string | null) => { live.current.list = id; setListState(id); }, []);
-  const currentList = () => live.current.playlists.find((p) => p.id === live.current.list) ?? null;
 
   // update the ref synchronously too: PiP events can fire before React re-renders
   const changeMode = useCallback((m: Mode) => { live.current.mode = m; setMode(m); }, []);
@@ -176,25 +182,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     else open(f); // stays in PiP / mini player
   }, [navigate, open]);
 
+  /** the queue for the current file (waits for it if it's still loading) */
+  const currentQueue = useCallback(async () => {
+    const { file: f, list: l, queue: q } = live.current;
+    if (!f) return null;
+    return q ?? fetchQuery<WatchData>(urls.watch(f.name, l)).catch(() => null);
+  }, []);
+
   const next = useCallback(() => {
-    const { file: f, files: fs, collections: cs } = live.current;
-    const n = f && upNextFor(f, fs, cs, currentList())[0];
-    if (n) go(n);
-  }, [go]);
+    currentQueue().then((q) => { const n = q?.next[0]; if (n) go(n); });
+  }, [go, currentQueue]);
 
   const prev = useCallback(() => {
-    const { file: f, files: fs, collections: cs } = live.current;
-    if (!f) return;
+    if (!live.current.file) return;
     if (el.currentTime > 3) { el.currentTime = 0; return; }
-    const pl = currentList();
-    let p = pl && pl.items.includes(f.name) ? playlistNeighbours(pl, f, fs).before : prevInCollection(f, fs, cs);
-    while (!p && hist.current.length) {
-      const name = hist.current[hist.current.length - 1];
-      hist.current = hist.current.slice(0, -1);
-      p = fs.find((x) => x.name === name) ?? null;
-    }
-    if (p) go(p, true); else el.currentTime = 0;
-  }, [el, go]);
+    currentQueue().then(async (q) => {
+      if (q?.prev) { go(q.prev, true); return; }
+      while (hist.current.length) {   // outside albums / playlists: what played before
+        const name = hist.current[hist.current.length - 1];
+        hist.current = hist.current.slice(0, -1);
+        const w = await fetchQuery<WatchData>(urls.watch(name)).catch(() => null);
+        if (w) { go(w.file, true); return; }
+      }
+      el.currentTime = 0;
+    });
+  }, [el, go, currentQueue]);
 
   useEffect(() => {
     const onTime = () => {
@@ -258,8 +270,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   // the playing file was deleted
   useEffect(() => {
-    if (filesLoaded && file && !files.some((f) => f.name === file.name)) close();
-  }, [filesLoaded, files, file, close]);
+    if (queueError instanceof HttpError && queueError.status === 404) close();
+  }, [queueError, close]);
 
   const showMini = !!(mode === "mini" && file);
   const audio = file?.kind === "audio";
@@ -270,11 +282,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (showMini) document.documentElement.dataset.mini = audio ? "bar" : "card";
     else delete document.documentElement.dataset.mini;
   }, [el, showMini, audio]);
-  const hasNext = !!file && upNextFor(file, files, collections, playlists.find((p) => p.id === list) ?? null).length > 0;
+  const hasNext = !!queue?.next.length;
   const openPage = () => file && navigate(watchPath(file.name, list));
 
   return (
-    <Ctx.Provider value={{ media: el, file, next, prev, list, setList, speed, setSpeed, mode, autoplay, setAutoplay, open, attach, detach, close }}>
+    <Ctx.Provider value={{ media: el, file, next, prev, hasNext, list, setList, speed, setSpeed, mode, autoplay, setAutoplay, open, attach, detach, close }}>
       {children}
       {/* parking spot / mini player; stays in the DOM so PiP keeps a live element.
           phone: slim bar above the tab bar · desktop: music bar along the bottom, or a corner card for video */}

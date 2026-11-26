@@ -12,14 +12,16 @@ const STATUS: Record<Job["status"], { label: string; dot: string }> = {
   cancelled: { label: "Stopped", dot: "bg-faint" },
 };
 
+const MEDIA = /\.(mp4|mkv|webm|m4v|mov|avi|mp3|m4a|opus|ogg|wav|flac)$/i;
+
 export function JobCard({ job }: { job: Job }) {
-  const { cancel, files } = useStore();
+  const { cancel } = useStore();
   const [stopping, setStopping] = useState(false);
   const active = isActive(job);
   const pct = job.status === "complete" ? 100 : job.percent;
   const s = STATUS[job.status];
-  const libNames = new Set(files.map((f) => f.name));
-  const landed = job.files.filter((n) => libNames.has(n));
+  // finished files only (not yt-dlp's intermediate streams)
+  const landed = job.files.filter((n) => MEDIA.test(n) && !/\.(f\d+|temp)\.[^.]+$/.test(n) && !n.split("/").pop()!.startsWith("."));
   const multi = job.playlist_count && job.playlist_count > 1;
 
   return (
