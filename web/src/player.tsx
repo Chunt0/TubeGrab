@@ -123,7 +123,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const p = live.current.progress[f.name];
     const at = start ?? (resumable(f) && p && !p.watched && p.pos > 15 && (!f.duration || p.pos < f.duration - 20) ? p.pos : null);
     if (at) el.addEventListener("loadedmetadata", () => { el.currentTime = at; }, { once: true });
-    el.poster = thumbUrl(f.name, f.art);
+    el.poster = thumbUrl(f.name, f.art, true);
     // PiP needs a video track; keep audio out of it
     el.disablePictureInPicture = f.kind === "audio";
     el.play().catch(() => { /* autoplay blocked: user presses play */ });
@@ -132,7 +132,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         title: f.title,
         artist: cleanChannel(f.uploader),
         album: f.album ?? f.collection.split("/").pop() ?? "",
-        artwork: [{ src: thumbUrl(f.name, f.art) }],
+        artwork: [{ src: thumbUrl(f.name, f.art, true) }],
       });
     }
   }, [el, saveProgress]);

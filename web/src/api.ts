@@ -48,9 +48,6 @@ export interface LibraryFile {
   index: number | null;
   /** album cover chosen for this track's album (cache key for its thumbnail) */
   art?: string | null;
-  /** resume position (s) and finished flag, shared across devices */
-  pos?: number;
-  watched?: boolean;
   chapters?: Chapter[] | null;
   /** song lyrics found: line-synced, or plain text */
   lyrics?: "synced" | "plain" | null;
@@ -104,6 +101,21 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** GET that returns null when the server says nothing changed since `etag`. */
+const etags = new Map<string, string>();
+async function fresh<T>(path: string): Promise<T | null> {
+  const tag = etags.get(path);
+  const r = await fetch(path, { headers: tag ? { "If-None-Match": tag } : {}, cache: "no-store" });
+  if (r.status === 304) return null;
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || r.statusText || "Request failed");
+  const next = r.headers.get("ETag");
+  if (next) etags.set(path, next);
+  return body as T;
+}
+/** the next fresh() of `path` downloads it again */
+export const forgetEtag = (path: string) => etags.delete(path);
+
 const post = (body: unknown): RequestInit => ({
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -112,7 +124,10 @@ const post = (body: unknown): RequestInit => ({
 
 export const api = {
   jobs: () => req<{ jobs: Job[] }>("/api/jobs").then((r) => r.jobs),
-  files: () => req<{ dir: string; files: LibraryFile[]; collections: Collection[]; playlists: Playlist[] }>("/api/files"),
+  /** null: unchanged since the last call */
+  files: () => fresh<{ dir: string; files: LibraryFile[]; collections: Collection[]; playlists: Playlist[] }>("/api/files"),
+  /** resume position + watched by library name; null: unchanged */
+  progressAll: () => fresh<Record<string, { pos: number; watched: boolean }>>("/api/progress"),
   createPlaylist: (title: string, items: string[] = [], description = "") =>
     req<{ playlist: Playlist }>("/api/playlists", post({ title, items, description })).then((r) => r.playlist),
   updatePlaylist: (id: string, patch: PlaylistPatch) =>
@@ -150,7 +165,10 @@ export const api = {
 const encPath = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 export const mediaUrl = (name: string) => `/media/${encPath(name)}`;
 /** `v` busts the browser cache when an album's chosen cover changes; `own` skips it. */
-export const thumbUrl = (name: string, v?: string | null) => `/thumb/${encPath(name)}${v ? `?v=${encodeURIComponent(v)}` : ""}`;
+export const thumbUrl = (name: string, v?: string | null, full = false) => {
+  const q = [v && `v=${encodeURIComponent(v)}`, full && "full=1"].filter(Boolean).join("&");
+  return `/thumb/${encPath(name)}${q ? `?${q}` : ""}`;
+};
 export const ownThumbUrl = (name: string) => `/thumb/${encPath(name)}?own=1`;
 export const isActive = (j: Job) => j.status === "queued" || j.status === "downloading";
 

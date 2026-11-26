@@ -70,7 +70,8 @@ Image → Import (the NAS must have the same CPU architecture).
   slides/animation, up to ~500 MB/h; **Audio** is M4A (YouTube's original AAC,
   no re-encode, ≈ 1 MB/min, with cover art + tags)
 - Full playlist support: one job downloads every entry, with per-entry
-  progress (`entry 3/25`); one broken entry doesn't kill the job
+  progress (`entry 3/25`); one broken entry doesn't kill the job. Two
+  downloads run at a time, the rest queue (`TUBEGRAB_PARALLEL`)
 - Live progress: percent, speed, ETA, current file; a **Stop** button cancels
   a running download
 - **Quick grab** from anywhere: `⌘K` / `/` opens it, or just paste a link on any page
@@ -105,7 +106,11 @@ Image → Import (the NAS must have the same CPU architecture).
 - **Phones**: bottom tab bar, docked mini player, add to home screen for a
   full-screen app
 - Downloads page (`/downloads`): live job cards plus a file manager
-- Progress polling every 1.2 s; the library refreshes when jobs finish
+- Built for a small NAS: the library listing is built once and only rebuilt
+  when a folder or metadata changes; devices poll it with ETags, so "nothing
+  changed" costs ~0 bytes. Grids load ~480 px thumbnail copies (made once, in
+  `.meta/thumbs/sm/`) and render more cards as you scroll. Tested at 11k tracks:
+  rebuild ≈ 0.7 s on a desktop CPU, unchanged polls < 1 ms
 
 ## Updating yt-dlp
 

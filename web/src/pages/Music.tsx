@@ -8,6 +8,7 @@ import { AlbumCard } from "../components/CollectionCard";
 import { GrabForm } from "../components/GrabForm";
 import { Thumb } from "../components/Thumb";
 import { ItemMenu } from "../components/ItemMenu";
+import { Grow } from "../lib/showMore";
 
 type Sort = "recent" | "artist" | "title" | "year";
 const SORTS: { id: Sort; label: string }[] = [
@@ -135,7 +136,7 @@ export function Music() {
       <section className="mt-8">
         <SectionHead title={needle ? `Albums · ${shownAlbums.length}` : "Albums"} />
         {shownAlbums.length
-          ? <div className={ALBUM_GRID}>{shownAlbums.map((c) => <AlbumCard key={c.key} c={c} />)}</div>
+          ? <Grow list={shownAlbums} className={ALBUM_GRID}>{(c) => <AlbumCard key={c.key} c={c} />}</Grow>
           : <p className="py-10 text-[13px] text-muted">No matches.</p>}
       </section>
 

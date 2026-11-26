@@ -10,6 +10,7 @@ import { VideoCard } from "../components/VideoCard";
 import { KIND_LABEL } from "../components/CollectionCard";
 import { EditCollection } from "../components/EditCollection";
 import { TrackRow } from "./Music";
+import { Grow } from "../lib/showMore";
 
 const GRID = "grid grid-cols-1 gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
 
@@ -126,11 +127,9 @@ export function CollectionPage({ name: key }: { name: string }) {
             </div>
             <Actions items={items} c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} />
           </header>
-          <div className={`mt-6 ${GRID}`}>
-            {items.map((f, i) => (
-              <VideoCard key={f.name} file={f} position={c.kind === "playlist" ? f.index ?? i + 1 : null} showChannel={c.kind === "playlist"} />
-            ))}
-          </div>
+          <Grow list={items} className={`mt-6 ${GRID}`}>
+            {(f, i) => <VideoCard key={f.name} file={f} position={c.kind === "playlist" ? f.index ?? i + 1 : null} showChannel={c.kind === "playlist"} />}
+          </Grow>
         </>
       )}
 

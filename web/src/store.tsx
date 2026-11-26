@@ -66,16 +66,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
   const dismiss = useCallback((id: number) => setToasts((ts) => ts.filter((x) => x.id !== id)), []);
 
-  const refreshFiles = useCallback(async () => {
-    try {
-      const r = await api.files();
-      setFiles(r.files);
-      setCollections(r.collections ?? []);
-      setPlaylists(r.playlists ?? []);
-      setProgress(Object.fromEntries(r.files.map((f) => [f.name, { pos: f.pos ?? 0, watched: !!f.watched }])));
-      setDir(r.dir);
-    } catch { /* server hiccup; next poll retries */ }
-    setFilesLoaded(true);
+  // One refresh at a time; a call made while one runs gets one more right after it.
+  const busy = useRef<Promise<void> | null>(null);
+  const again = useRef(false);
+  const refreshFiles = useCallback(async (): Promise<void> => {
+    if (busy.current) {
+      again.current = true;
+      return busy.current;
+    }
+    const run = async () => {
+      do {
+        again.current = false;
+        try {
+          const [r, p] = await Promise.all([api.files(), api.progressAll()]);
+          if (r) {
+            setFiles(r.files);
+            setCollections(r.collections ?? []);
+            setPlaylists(r.playlists ?? []);
+            setDir(r.dir);
+          }
+          if (p) setProgress(p);
+        } catch { /* server hiccup; next poll retries */ }
+      } while (again.current);
+      setFilesLoaded(true);
+    };
+    busy.current = run().finally(() => { busy.current = null; });
+    return busy.current;
   }, []);
 
   // Jobs: poll fast while something is running, slowly otherwise.
@@ -118,8 +134,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     refreshFiles();
-    const t = setInterval(refreshFiles, 8000);
-    return () => clearInterval(t);
+    const t = setInterval(() => { if (!document.hidden) refreshFiles(); }, 8000);
+    const back = () => { if (!document.hidden) refreshFiles(); };
+    document.addEventListener("visibilitychange", back);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", back); };
   }, [refreshFiles]);
 
   const grab = useCallback(async (url: string, format: Format, playlist: boolean) => {

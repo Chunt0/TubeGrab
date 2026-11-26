@@ -8,6 +8,7 @@ import { VideoCard } from "../components/VideoCard";
 import { GrabForm } from "../components/GrabForm";
 import { CollectionCard } from "../components/CollectionCard";
 import { Tab } from "../components/ui";
+import { Grow } from "../lib/showMore";
 import { SearchBox, SectionHead as Head } from "./Music";
 
 type Kind = "all" | "video" | "audio";
@@ -171,7 +172,7 @@ export function Videos() {
         <section className="mt-10">
           <SectionHead title={filtering ? `${list.length} result${list.length === 1 ? "" : "s"}` : "Recent"} />
           {list.length
-            ? <div className={GRID}>{list.map((f) => <VideoCard key={f.name} file={f} />)}</div>
+            ? <Grow list={list} className={GRID}>{(f) => <VideoCard key={f.name} file={f} />}</Grow>
             : <p className="py-16 text-center text-[13px] text-muted">No matches.</p>}
         </section>
       )}
