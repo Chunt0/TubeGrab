@@ -862,7 +862,20 @@ def _generate_thumb(path: Path, out: Path) -> None:
             continue  # noqa: S110 — fall through to the placeholder
 
 
-_probe_cache: dict[str, dict] = {}
+# ffprobe is slow on a NAS CPU: keep results on disk so restarts/deploys are instant
+PROBE_FILE = META_DIR / "probe.json"
+_probe_cache: dict[str, dict] = _read_json(PROBE_FILE, {})
+_probe_dirty = False
+
+
+def _save_probe_cache() -> None:
+    global _probe_dirty
+    if not _probe_dirty:
+        return
+    _probe_dirty = False
+    with _meta_lock:
+        live = {k: v for k, v in _probe_cache.items() if Path(k.split("|")[0]).exists()}
+        _write_json(PROBE_FILE, live)
 
 
 def _probe(path: Path) -> dict:
@@ -888,7 +901,9 @@ def _probe(path: Path) -> dict:
                 break
     except Exception:  # noqa: BLE001 — cosmetic
         pass
+    global _probe_dirty
     _probe_cache[key] = res
+    _probe_dirty = True
     return res
 
 
@@ -969,6 +984,7 @@ def _library() -> tuple[list[dict], list[dict]]:
             "lyrics": lyrics.get(vid) if vid and _kind(path) == "audio" else None,
         })
     files.sort(key=lambda f: f["mtime"], reverse=True)
+    _save_probe_cache()
 
     collections: dict[str, dict] = {}
     for f in files:
