@@ -1,0 +1,9 @@
+.venv/
+downloads/
+thumbs/
+cookies.txt
+**/__pycache__/
+*.pyc
+web/node_modules/
+web/dist/
+.git/

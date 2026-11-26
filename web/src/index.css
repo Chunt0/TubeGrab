@@ -1,0 +1,74 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter-tight";
+@import "@fontsource-variable/jetbrains-mono";
+
+@theme {
+  --font-sans: "Inter Tight Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  --color-ink: #0b0b0c;
+  --color-surface: #111113;
+  --color-raised: #18181a;
+  --color-hover: #1e1e21;
+  --color-line: rgb(255 255 255 / 0.08);
+  --color-line-strong: rgb(255 255 255 / 0.16);
+  --color-fg: #e8e8ea;
+  --color-muted: #8a8a90;
+  --color-faint: #56565c;
+  --color-ok: #4ade80;
+  --color-bad: #f87171;
+
+  /* minimal corners everywhere */
+  --radius-xs: 1px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
+
+  --animate-shimmer: shimmer 1.2s linear infinite;
+  --animate-fade: fade 0.18s ease-out both;
+
+  @keyframes shimmer {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(250%); }
+  }
+  @keyframes fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    /* phone chrome: bottom tab bar + docked mini player (set by the player) */
+    --tabbar: calc(3.5rem + env(safe-area-inset-bottom));
+    --mini: 0px;
+  }
+  html[data-mini] { --mini: 4.5rem; }          /* phone: docked bar (music + video) */
+  @media (width >= 40rem) {
+    html { --tabbar: 0px; }
+    html[data-mini] { --mini: 0px; }           /* desktop video: corner card */
+    html[data-mini="bar"] { --mini: 4.5rem; }  /* desktop music: bottom bar */
+  }
+  /* iOS zooms into inputs smaller than 16px */
+  @media (width < 40rem) {
+    input, select, textarea { font-size: 16px !important; }
+  }
+  body { overscroll-behavior-y: none; }
+  body {
+    @apply bg-ink text-fg font-sans antialiased;
+    font-feature-settings: "ss01", "cv11";
+  }
+  ::selection { background: var(--color-fg); color: var(--color-ink); }
+  * { scrollbar-width: thin; scrollbar-color: #2a2a2e transparent; }
+  :focus-visible { outline: 1px solid var(--color-fg); outline-offset: 2px; }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+}
+
+@utility tabular { font-variant-numeric: tabular-nums; }

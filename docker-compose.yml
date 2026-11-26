@@ -1,0 +1,27 @@
+# TubeGrab on a Synology NAS (Container Manager → Project → Create).
+# Edit the volume path and PUID/PGID, then build + start.
+services:
+  tubegrab:
+    build: .
+    image: tubegrab:latest
+    container_name: tubegrab
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    # Public DNS: the downloader only needs internet names, and shouldn't
+    # depend on a LAN DNS box (Pi-hole etc.) being up.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      # Owner of downloaded files. Find yours via SSH: `id <your-dsm-user>`
+      # (first DSM user is usually uid=1026, group "users" is gid=100).
+      PUID: "1026"
+      PGID: "100"
+      # Pull the newest yt-dlp on every container start (recommended).
+      YTDLP_AUTOUPDATE: "1"
+    volumes:
+      # Where the library lives on the NAS — must be an existing shared folder path.
+      - /volume1/chunt/media/YouTube:/downloads
+      # Optional: put a Netscape-format cookies.txt here (only if YouTube asks you to sign in).
+      # - /volume1/docker/tubegrab:/config

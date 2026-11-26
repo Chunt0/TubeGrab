@@ -1,0 +1,12 @@
+# local runtime
+.venv/
+downloads/
+thumbs/
+cookies.txt
+__pycache__/
+*.pyc
+
+# web build
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo

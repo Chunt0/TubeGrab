@@ -1,0 +1,25 @@
+import { CheckCheck, ListPlus, RotateCcw } from "lucide-react";
+import { resumable, type LibraryFile } from "../api";
+import { useStore } from "../store";
+import { cx } from "../lib/format";
+import { Menu, MenuItem } from "./ui";
+
+/** Per-track / per-video "⋯" (hover on desktop, always there on touch screens). */
+export function ItemMenu({ file, className }: { file: LibraryFile; className?: string }) {
+  const { openAddToPlaylist, progress, setWatched } = useStore();
+  const watched = !!progress[file.name]?.watched;
+  return (
+    <Menu className={cx("opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100", className)}>
+      {(close) => (
+        <>
+          <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist([file.name]); }}>Add to playlist…</MenuItem>
+          {resumable(file) && (
+            <MenuItem icon={watched ? RotateCcw : CheckCheck} onClick={() => { close(); setWatched(file, !watched).catch(() => {}); }}>
+              {watched ? "Mark as unwatched" : "Mark as watched"}
+            </MenuItem>
+          )}
+        </>
+      )}
+    </Menu>
+  );
+}
