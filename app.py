@@ -9,7 +9,7 @@ automatically:
     Music/<Artist>/<Album (Year)>/<NN - Track>.m4a     audio (album or single)
     Music/<Artist>/Singles/<Track>.m4a                 audio without album info
     Videos/<Channel>/<Title>.mp4                       single videos
-    Playlists/<Playlist>/<NNN - Title>.mp4             any other playlist
+    Playlists/<Playlist>/<NNN - Title>.mp4             any other video playlist
     .meta/                                             index, metadata, thumbnails
 
 Run:  ./run.sh   →  http://127.0.0.1:8765
@@ -233,8 +233,9 @@ def _is_album_playlist(info: dict) -> bool:
     return str(info.get("playlist_id") or "").startswith("OLAK5uy_")
 
 
-def _plan(info: dict, *, audio: bool, playlist_mode: bool) -> dict:
-    """Decide where an entry goes. Returns {rel (no extension), section, tags}."""
+def _plan(info: dict, *, audio: bool, playlist_mode: bool, album: dict | None = None) -> dict:
+    """Decide where an entry goes. Returns {rel (no extension), section, tags}.
+    `album`: this playlist was identified as one album (_identify_album)."""
     title = info.get("track") or info.get("title") or info.get("id") or "Untitled"
     in_playlist = playlist_mode and bool(info.get("playlist_id"))
     album_pl = in_playlist and _is_album_playlist(info)
@@ -245,6 +246,17 @@ def _plan(info: dict, *, audio: bool, playlist_mode: bool) -> dict:
     # a regular playlist that is really one album ("The Smashing Pumpkins: Gish (Deluxe Edition)")
     album_like = album_pl or (in_playlist and has_album and len(_fold(info["album"])) >= 3
                               and _fold(info["album"]) in _fold(info.get("playlist_title") or ""))
+    if audio and in_playlist and album and not has_album and not album_pl:
+        # fan uploads of one album: Music/Artist/Album (Year)/NN - Track, as the album has it
+        t = album["tracks"].get(info.get("id")) or {
+            "no": None, "title": _local_title(title, album.get("guess_artist"), album.get("guess_album"))}
+        adir, folder, year = _album_folder(album["artist"], album["album"], album.get("year"), album.get("url"))
+        no = t.get("no")
+        name = f"{int(no):02d} - {_clean(t['title'])}" if no else _clean(t["title"])
+        tags = {"artist": adir, "album_artist": adir, "album": album["album"], "track_number": no,
+                "release_year": year, "track": t["title"]}
+        return {"rel": f"Music/{adir}/{folder}/{name}", "section": "Music", "tags": tags, "mixed_playlist": False,
+                "collection_title": album["album"], "collection_url": album.get("url")}
     # audio goes to Music when YouTube knows the song; a mixed playlist's songs
     # land in their own albums (and become one of your playlists, see _run_job)
     if audio and (album_like or artist) and (not in_playlist or album_like or has_album):
@@ -268,6 +280,19 @@ def _plan(info: dict, *, audio: bool, playlist_mode: bool) -> dict:
         return {"rel": rel, "section": "Music", "tags": tags, "mixed_playlist": in_playlist and not album_like,
                 "collection_title": album, "collection_url": info.get("playlist_webpage_url") if album_like else None}
 
+    if audio:
+        # audio is music: a song YouTube knows nothing about goes to its artist's singles,
+        # read from an 'Artist - Song' title, else the channel (from a playlist, the
+        # playlist itself becomes one of your playlists, see _run_job)
+        channel = _clean_channel(info.get("uploader") or info.get("channel")) or "Unknown"
+        parts = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
+        if len(parts) == 2 and 0 < len(parts[0]) <= 40 and parts[1].strip():
+            channel, title = parts[0].strip(), _track_title(parts[1], None)
+        adir = _artist_dir(channel)
+        return {"rel": f"Music/{adir}/{SINGLES}/{_clean(title)}", "section": "Music",
+                "tags": {"artist": channel, "album_artist": adir, "track": title}, "mixed_playlist": in_playlist,
+                "collection_title": None, "collection_url": None}
+
     if in_playlist:
         pl = info.get("playlist_title") or "Playlist"
         idx = info.get("playlist_index")
@@ -275,15 +300,302 @@ def _plan(info: dict, *, audio: bool, playlist_mode: bool) -> dict:
         return {"rel": f"Playlists/{_clean(pl)}/{name}", "section": "Playlists", "tags": tags,
                 "collection_title": pl, "collection_url": info.get("playlist_webpage_url")}
 
-    if audio:
-        channel = _clean_channel(info.get("uploader") or info.get("channel"))
-        return {"rel": f"Music/{_clean(channel)}/{SINGLES}/{_clean(title)}", "section": "Music",
-                "tags": {"artist": channel, "album_artist": channel}, "collection_title": None,
-                "collection_url": None}
-
     channel = _clean_channel(info.get("uploader") or info.get("channel"))
     return {"rel": f"Videos/{_clean(channel)}/{_clean(title)}", "section": "Videos", "tags": tags,
             "collection_title": channel, "collection_url": info.get("channel_url") or info.get("uploader_url")}
+
+
+# ---------------------------------------------------------------- album playlists
+# Someone's "Primus - Frizzle Fry (full album)" playlist of fan uploads carries no
+# music metadata, so _plan would file it as a plain playlist. Before an audio
+# playlist downloads we look at its title and entry titles; when it looks like
+# one album, MusicBrainz (free, open music database; only the guessed artist and
+# album name are sent) confirms it and gives the real track list, numbers, year
+# and cover. Answers are kept per playlist in .meta/albums.json.
+
+ALBUMS_FILE = META_DIR / "albums.json"
+MUSICBRAINZ = "https://musicbrainz.org/ws/2"
+COVER_ART = "https://coverartarchive.org"
+# "Primus- To Defy", "PRIMUS: Spaghetti Western", "Malloy - Primus" (not "Skinny-Constantinople")
+_SEP = re.compile(r"\s+[-–—|:~]+\s*|\s*[-–—|:~]+\s+")
+_ALBUM_WORDS = re.compile(
+    r"[\(\[]?\s*\b(?:(?:the\s+)?(?:full|complete|whole|entire)\s+(?:album|lp|ep|record)|album\s+(?:completo|complet|completa)"
+    r"|full\s*-\s*album|fullalbum)\b\s*[\)\]]?", re.I)
+_PL_JUNK = re.compile(r"[\(\[]\s*(?:hq|hd|high quality|remaster(?:ed)?|\d{4}|lyrics?|audio)\s*[\)\]]", re.I)
+_FILE_EXT = re.compile(r"\.(?:wmv|avi|mp4|flv|mov|mkv|mp3|m4a|wav)\b", re.I)
+_TRACK_NUM = re.compile(r"^\s*(?:track\s*)?\d{1,2}\s*[.)\-–]\s+|\s*#\d{1,2}\s*$", re.I)
+_mb_last = 0.0
+_albums_lock = threading.Lock()
+
+
+def _norm(s: str) -> str:
+    """Loose comparison form: 'Hello Skinny / Constantinople' == 'hello skinny-constantinople'."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c)).casefold().replace("&", " and ")
+    s = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", s)
+    return re.sub(r"[^\w]+", " ", s).strip()
+
+
+def _http_json(url: str, *, mb: bool = False):
+    import urllib.error
+    import urllib.request
+    global _mb_last
+    req = urllib.request.Request(url, headers={"User-Agent": "TubeGrab/1.0 (self-hosted music library)",
+                                               "Accept": "application/json"})
+    for attempt in range(3):
+        if mb:
+            wait = _mb_last + 1.1 - time.monotonic()   # MusicBrainz asks for ≤ 1 request / s
+            if wait > 0:
+                time.sleep(wait)
+            _mb_last = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if e.code in (429, 503) and attempt < 2:
+                time.sleep(3)
+                continue
+            raise
+
+
+def _guess_album(title: str, entries: list[dict]) -> dict | None:
+    """From the playlist and entry titles: {artist, album, year, said} or None.
+    `said` = the playlist calls itself an album ('(full album)')."""
+    n = len(entries)
+    if n < 3:
+        return None
+    counts: dict[str, int] = {}
+    spellings: dict[str, list[str]] = {}
+    for e in entries:
+        parts = [p.strip() for p in _SEP.split(e.get("title") or "") if p.strip()]
+        if len(parts) < 2:
+            continue
+        for p in {parts[0], parts[-1]}:
+            k = _norm(p)
+            if k:
+                counts[k] = counts.get(k, 0) + 1
+                spellings.setdefault(k, []).append(p)
+    said = bool(_ALBUM_WORDS.search(title))
+    rest = _ALBUM_WORDS.sub(" ", title)
+    # "(1990)", "[1990]" or a trailing 1990 (not "Taylor Swift - 1989 (Taylor's Version)")
+    m = re.search(r"[\(\[]\s*(19[5-9]\d|20[0-4]\d)\s*[\)\]]|[\s,-](19[5-9]\d|20[0-4]\d)\s*$", rest)
+    year = (m.group(1) or m.group(2)) if m else None
+    if m:
+        rest = rest[:m.start()] + " " + rest[m.end():]
+    rest = re.sub(r"[\(\[]\s*[\)\]]", " ", _PL_JUNK.sub(" ", rest))
+    artist = None
+    best = max(counts.items(), key=lambda kv: kv[1], default=None)
+    if best and best[1] >= max(2, 0.6 * n):
+        # the album name can repeat in every title too ('… - Frizzle Fry'): the artist is the one the playlist starts with
+        top = [k for k, c in counts.items() if c >= max(2, 0.6 * n)]
+        starts = [k for k in top if _norm(rest).startswith(k)]
+        key = starts[0] if starts else best[0]
+        names = spellings[key]
+        artist = sorted(set(names), key=lambda s: (s.isupper(), -names.count(s)))[0]
+    album = rest
+    if artist:
+        a = re.escape(_norm(artist)).replace(r"\ ", r"[^\w]+")
+        album = re.sub(rf"^\W*{a}\W*|\W*{a}\W*$", " ", rest, flags=re.I) if re.search(a, _norm(rest)) else rest
+        # "Primus Frizzle Fry": strip the artist's words however they're written
+        words = artist.split()
+        album = re.sub(r"^\W*" + r"\W+".join(map(re.escape, words)) + r"(?:'s)?\W*", "", album.strip(), flags=re.I)
+        album = re.sub(r"\W*" + r"\W+".join(map(re.escape, words)) + r"\W*$", "", album, flags=re.I)
+    album = re.sub(r"\s+", " ", album).strip(" -–—|:~.,")
+    if not album or (not artist and not said):
+        return None
+    return {"artist": artist, "album": album, "year": year, "said": said}
+
+
+def _guesses(g: dict) -> list[dict]:
+    """Ways to read the guess: as is, or, with no artist in the entry titles,
+    'Artist - Album' / 'Nirvana Nevermind' split from the playlist title."""
+    if g["artist"]:
+        return [g]
+    parts = [p.strip() for p in _SEP.split(g["album"]) if p.strip()]
+    if len(parts) == 2:
+        return [{**g, "artist": parts[0], "album": parts[1]}, {**g, "artist": parts[1], "album": parts[0]}]
+    words = g["album"].split()
+    return [{**g, "artist": " ".join(words[:k]), "album": " ".join(words[k:])} for k in range(1, min(4, len(words)))]
+
+
+def _local_title(title: str, artist: str | None, album: str | None) -> str:
+    """'Primus- Mr. Knowitall- Frizzle Fry' → 'Mr. Knowitall'."""
+    drop = {_norm(x) for x in (artist, album) if x}
+    parts = [p.strip() for p in _SEP.split(title) if p.strip()]
+    keep = [p for p in parts if _norm(p) not in drop] or parts
+    t = " - ".join(keep)
+    t = _TRACK_NUM.sub("", _FILE_EXT.sub("", t))
+    return _track_title(t, None)
+
+
+def _mb_quote(s: str) -> str:
+    return '"' + s.replace("\\", " ").replace('"', " ") + '"'
+
+
+def _mb_release(guess: dict, entries: list[dict]) -> dict | None:
+    """The MusicBrainz release whose track list best matches the entries."""
+    import urllib.parse
+    q = f"release:{_mb_quote(guess['album'])}"
+    if guess["artist"]:
+        q += f" AND artist:{_mb_quote(guess['artist'])}"
+    found = _http_json(f"{MUSICBRAINZ}/release/?{urllib.parse.urlencode({'query': q, 'limit': 25, 'fmt': 'json'})}", mb=True)
+    cands = [r for r in (found or {}).get("releases", []) if r.get("score", 0) >= 90]
+    if not cands:
+        return None
+    n = len(entries)
+    cands.sort(key=lambda r: (abs((r.get("track-count") or 0) - n), r.get("status") != "Official",
+                              (r.get("release-group") or {}).get("primary-type") != "Album"))
+    best, seen = None, set()
+    for r in cands:
+        tc = r.get("track-count")
+        if tc in seen:
+            continue
+        seen.add(tc)
+        full = _http_json(f"{MUSICBRAINZ}/release/{r['id']}?inc=recordings+artist-credits+release-groups&fmt=json", mb=True)
+        if not full:
+            continue
+        tracks = [t for m in full.get("media") or [] for t in m.get("tracks") or []]
+        pairs = _match_tracks(entries, [t.get("title") or "" for t in tracks], guess)
+        if not best or len(pairs) > len(best[1]):
+            best = (full, pairs, tracks)
+        if len(seen) >= 3 or len(pairs) == n:
+            break
+    if not best:
+        return None
+    full, pairs, tracks = best
+    if len(pairs) < max(3, 0.6 * min(n, len(tracks))):
+        return None
+    rg = full.get("release-group") or {}
+    credit = full.get("artist-credit") or []
+    artist = "".join((c.get("name") or "") + (c.get("joinphrase") or "") for c in credit).strip() or guess["artist"]
+    year = (rg.get("first-release-date") or full.get("date") or "")[:4]
+    return {"artist": artist, "album": full.get("title") or guess["album"],
+            "year": year if year.isdigit() else guess.get("year"),
+            "mbid": full["id"], "rgid": rg.get("id"),
+            "tracks": {entries[i]["id"]: {"no": j + 1, "title": tracks[j]["title"]} for i, j in pairs.items()}}
+
+
+def _match_tracks(entries: list[dict], titles: list[str], guess: dict) -> dict[int, int]:
+    """entry index → track index, best pairs first, each track used once."""
+    import difflib
+    tn = [_norm(t) for t in titles]
+    scored = []
+    for i, e in enumerate(entries):
+        en = _norm(_local_title(e.get("title") or "", guess["artist"], guess["album"]))
+        full = _norm(e.get("title") or "")
+        for j, t in enumerate(tn):
+            if not t or not en:
+                continue
+            s = difflib.SequenceMatcher(None, en, t).ratio()
+            if len(t) >= 4 and (re.search(rf"\b{re.escape(t)}\b", en) or re.search(rf"\b{re.escape(t)}\b", full)):
+                s = max(s, 0.86)
+            if s >= 0.8:
+                scored.append((s, i, j))
+    pairs: dict[int, int] = {}
+    used: set[int] = set()
+    for s, i, j in sorted(scored, reverse=True):
+        if i not in pairs and j not in used:
+            pairs[i] = j
+            used.add(j)
+    return pairs
+
+
+def _identify_album(pl_id: str, title: str, entries: list[dict], url: str | None = None) -> dict | None:
+    """{artist, album, year, url, mbid?, tracks: {video id: {no, title}}} when this
+    playlist is one album, else None. `entries`: [{id, title}] in playlist order."""
+    entries = [e for e in entries if e.get("id")]
+    with _albums_lock:
+        cache = _read_json(ALBUMS_FILE, {})
+        hit = cache.get(pl_id)
+        if hit and (hit.get("none") or all(e["id"] in hit.get("tracks", {}) for e in entries)):
+            return None if hit.get("none") else hit
+    guess = _guess_album(title, entries)
+    album = None
+    answered = True
+    if guess:
+        try:
+            for g in _guesses(guess):
+                album = _mb_release(g, entries)
+                if album:
+                    guess = g
+                    break
+        except Exception as exc:  # noqa: BLE001 — offline: decide from the titles alone, ask again next time
+            print(f"[tubegrab] MusicBrainz lookup failed: {exc}")
+            answered = False
+        if not album and guess["said"] and guess["artist"]:
+            album = {"artist": guess["artist"], "album": guess["album"], "year": guess["year"], "tracks": {}}
+    if album:
+        tracks = album["tracks"]
+        taken = {t["no"] for t in tracks.values()}
+        for i, e in enumerate(entries, 1):
+            if e["id"] not in tracks:
+                # not on the release (a bonus track…): its playlist position, when free
+                tracks[e["id"]] = {"no": i if i not in taken and not album.get("mbid") else None,
+                                   "title": _local_title(e.get("title") or "", guess["artist"], guess["album"])}
+        album["guess_artist"] = guess["artist"]
+        album["guess_album"] = guess["album"]
+        album["url"] = url or f"https://www.youtube.com/playlist?list={pl_id}"
+    if album or answered:
+        with _albums_lock:
+            cache = _read_json(ALBUMS_FILE, {})
+            cache[pl_id] = album or {"none": True}
+            _write_json(ALBUMS_FILE, cache)
+    return album
+
+
+def _album_for(url: str, opts: dict) -> dict | None:
+    """Before an audio playlist downloads: is it one album? (only its titles are read)"""
+    o = {k: opts[k] for k in ("js_runtimes", "cookiefile") if k in opts}
+    o.update(quiet=True, no_warnings=True, extract_flat="in_playlist", ignoreerrors=True)
+    try:
+        with yt_dlp.YoutubeDL(o) as y:
+            info = y.extract_info(url, download=False)
+        if not info or info.get("_type") != "playlist" or _is_album_playlist({"playlist_id": info.get("id")}):
+            return None
+        entries = [{"id": e.get("id"), "title": e.get("title")} for e in info.get("entries") or [] if e]
+        return _identify_album(info["id"], info.get("title") or "", entries, info.get("webpage_url"))
+    except Exception as exc:  # noqa: BLE001 — never fail a download over this
+        print(f"[tubegrab] album check failed: {exc}")
+        return None
+
+
+def _album_cover(key: str, album: dict) -> None:
+    """The album's front cover from the Cover Art Archive, unless you chose one."""
+    import types
+    import urllib.request
+    entry = _folders().get(key, {})
+    folder = DOWNLOAD_DIR / key
+    if not album.get("mbid") or entry.get("cover_file") or entry.get("cover") or not folder.is_dir():
+        return
+    data = None
+    for path in (f"release/{album['mbid']}", f"release-group/{album['rgid']}" if album.get("rgid") else None):
+        if not path:
+            continue
+        try:
+            req = urllib.request.Request(f"{COVER_ART}/{path}/front-500",
+                                         headers={"User-Agent": "TubeGrab/1.0 (self-hosted music library)"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(20 << 20)
+            break
+        except Exception:  # noqa: BLE001 — no cover there (404) or offline
+            continue
+    name = f"{uuid.uuid4().hex[:10]}.jpg"
+    if not data or not _save_picture(types.SimpleNamespace(save=lambda p: Path(p).write_bytes(data)), COVERS_DIR / name):
+        return
+    with _meta_lock:
+        folders = _folders()
+        entry = folders.setdefault(key, {})
+        if entry.get("cover_file") or entry.get("cover"):   # you picked one meanwhile
+            (COVERS_DIR / name).unlink(missing_ok=True)
+            return
+        entry["cover_file"] = name
+        _write_json(FOLDERS_FILE, folders)
+    for p in folder.iterdir():
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+            _embed_cover(p, COVERS_DIR / name)
 
 
 # ---------------------------------------------------------------- metadata store
@@ -661,8 +973,9 @@ class _GrabDL(yt_dlp.YoutubeDL):
     * records metadata and the id → path index.
     """
 
-    def __init__(self, params, *, job_id: str, playlist_mode: bool, kind: str):
+    def __init__(self, params, *, job_id: str, playlist_mode: bool, kind: str, album: dict | None = None):
         super().__init__(params)
+        self.album = album
         self.last_error: str | None = None
         self.job_id = job_id
         self.playlist_mode = playlist_mode
@@ -677,7 +990,7 @@ class _GrabDL(yt_dlp.YoutubeDL):
 
     def process_info(self, info_dict):
         audio = self.media_kind == "audio"
-        plan = _plan(info_dict, audio=audio, playlist_mode=self.playlist_mode)
+        plan = _plan(info_dict, audio=audio, playlist_mode=self.playlist_mode, album=self.album)
         vid = info_dict.get("id")
         ext = ".m4a" if audio else ".mp4"
         rel = _unique(plan["rel"], ext, vid)
@@ -725,8 +1038,8 @@ class _GrabDL(yt_dlp.YoutubeDL):
         """Pull a loose copy into the album/playlist now being grabbed."""
         cur = _rel(existing)
         dest = DOWNLOAD_DIR / (rel + existing.suffix)
-        if existing == dest or dest.exists():
-            return existing
+        if existing == dest or dest.exists() or _meta_for(_video_id(existing)).get("placed") == "user":
+            return existing   # (you moved it there yourself: it stays)
         cur_section = cur.split("/")[0]
         legacy = cur_section not in SECTIONS
         if plan["section"] == "Music":
@@ -856,8 +1169,9 @@ def _run_job_slot(job_id: str, url: str, fmt: str, playlist: bool) -> None:
     )
 
     try:
+        album = _album_for(url, opts) if fmt == "audio" and playlist else None
         with _GrabDL(opts, job_id=job_id, playlist_mode=playlist,
-                     kind="audio" if fmt == "audio" else "video") as ydl:
+                     kind="audio" if fmt == "audio" else "video", album=album) as ydl:
             ref["ydl"] = ydl
             info = ydl.extract_info(url, download=True)
         entries = (
@@ -870,6 +1184,9 @@ def _run_job_slot(job_id: str, url: str, fmt: str, playlist: bool) -> None:
             )
         if any(pl.get("mixed_playlist") for pl in ydl.plans.values()):
             _mirror_playlist(info, _jobs[job_id].get("files", []))
+        if album:
+            for key in {Path(p["rel"]).parent.as_posix() for p in ydl.plans.values() if p["section"] == "Music"}:
+                _album_cover(key, album)
         _update(
             job_id,
             status="complete",
@@ -2038,14 +2355,24 @@ def _refile_playlist_audio() -> None:
         return
     by_path = _ids_by_path()
     moved = 0
+    albums: dict[str, dict | None] = {}   # playlist id → identified album
+    covers: dict[str, dict] = {}
     for path in sorted(root.glob("*/*")):
         if not path.is_file() or path.suffix.lower() not in AUDIO_EXTS:
             continue
         vid = _video_id(path, by_path)
         meta = _meta_for(vid)
-        if not vid or not meta.get("album") or not meta.get("playlist_id"):
+        if not vid or not meta.get("playlist_id") or meta.get("placed") == "user":
             continue
-        plan = _plan(dict(meta), audio=True, playlist_mode=True)
+        album = None
+        if not meta.get("album"):   # fan uploads: one album after all? (_identify_album)
+            pl = meta["playlist_id"]
+            if pl not in albums:
+                albums[pl] = _album_of_folder(path.parent, pl, by_path)
+            album = albums[pl]
+            if not album:
+                continue
+        plan = _plan(dict(meta), audio=True, playlist_mode=True, album=album)
         if plan["section"] != "Music":
             continue
         ext = path.suffix.lower()
@@ -2066,9 +2393,28 @@ def _refile_playlist_audio() -> None:
             _embed_cover(dest, cover)
         _prune_empty_dirs(path.parent)
         moved += 1
+        if album:
+            covers[Path(rel).parent.as_posix()] = album
     if moved:
         _forget_gone_folders()
         print(f"[tubegrab] moved {moved} song(s) from Playlists/ into Music/")
+    for key, album in covers.items():
+        _album_cover(key, album)
+
+
+def _album_of_folder(folder: Path, pl_id: str, by_path: dict) -> dict | None:
+    """_identify_album for a playlist folder already downloaded (titles from .meta)."""
+    entries = []
+    for p in folder.iterdir():
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+            m = _meta_for(_video_id(p, by_path))
+            if m.get("id") and m.get("playlist_id") == pl_id and not m.get("album"):
+                entries.append(m)
+    if not entries:
+        return None
+    entries.sort(key=lambda m: m.get("playlist_index") or 0)
+    return _identify_album(pl_id, entries[0].get("playlist_title") or folder.name,
+                           [{"id": m["id"], "title": m.get("title")} for m in entries])
 
 
 def tidy_music() -> None:
@@ -3009,6 +3355,178 @@ def api_collection_edit():
     return jsonify(ok=True, key=new_key)
 
 
+# ---------------------------------------------------------------- Music ⇄ Videos
+# Audio downloads land in Music; the odd lecture grabbed as audio can be moved
+# to the video side (and a video, or a whole collection, the other way). Files
+# you moved are marked "placed" in their metadata so tidying never moves them back.
+
+def _move_file(path: Path, rel_noext: str, extra: dict, tags: dict | None = None) -> str:
+    """Move one library file to `rel_noext` (+ its extension); returns its new name."""
+    vid = _video_id(path)
+    rel = _unique(rel_noext, path.suffix.lower(), vid)
+    dest = DOWNLOAD_DIR / (rel + path.suffix)
+    if dest != path:
+        old = _rel(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(dest))
+        _prune_empty_dirs(path.parent)
+        _index_move(old, _rel(dest))
+    if vid:
+        _write_meta({"id": vid}, {**extra, "placed": "user"})
+    if tags:
+        _retag(dest, tags)
+    return _rel(dest)
+
+
+def _channel_of(meta: dict) -> str:
+    return (_clean_channel(meta.get("uploader") or meta.get("channel"))
+            or meta.get("album_artist") or meta.get("artist") or "Unknown")
+
+
+def _to_videos(path: Path, folder: str | None = None, idx: int | None = None) -> str:
+    """Videos/<Channel>/<Title>, or into the playlist folder `folder` at position `idx`."""
+    meta = _meta_for(_video_id(path))
+    title = _clean(meta.get("title") or meta.get("track") or _display_title(path.name))
+    if folder:
+        return _move_file(path, f"{folder}/{int(idx):03d} - {title}" if idx else f"{folder}/{title}", {"section": "Playlists"})
+    return _move_file(path, f"Videos/{_clean(_channel_of(meta))}/{title}", {"section": "Videos"})
+
+
+def _to_music_single(path: Path) -> str:
+    meta = _meta_for(_video_id(path))
+    artist = meta.get("album_artist") or meta.get("artist") or _channel_of(meta)
+    adir = _artist_dir(artist)
+    title = meta.get("track") or _track_title(meta.get("title") or _display_title(path.name), artist)
+    name = _move_file(path, f"Music/{adir}/{SINGLES}/{_clean(title)}",
+                      {"section": "Music", "album_artist": adir, "track": title},
+                      {"title": title, "artist": artist, "albumartist": adir})
+    if path.suffix.lower() in AUDIO_EXTS:
+        _fetch_lyrics_bg(DOWNLOAD_DIR / name)
+    return name
+
+
+def _media_in(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in MEDIA_EXTS)
+
+
+def _position(path: Path) -> int | None:
+    m = INDEX_PREFIX_RE.match(path.name)
+    return int(m.group(1)) if m else _meta_for(_video_id(path)).get("track_number")
+
+
+def _playlist_to_album(src: Path, key: str) -> str:
+    """A downloaded playlist (or folder) → Music/Artist/Album: the real album when
+    MusicBrainz recognises it (_identify_album), else named after the playlist."""
+    files = sorted(_media_in(src), key=lambda p: (_position(p) or 10**6, p.name))
+    metas = [(p, _meta_for(_video_id(p))) for p in files]
+    entries = [{"id": m["id"], "title": m.get("title")} for _, m in metas if m.get("id")]
+    pl_ids = {m.get("playlist_id") for _, m in metas if m.get("playlist_id")}
+    title = _folders().get(key, {}).get("title") or src.name
+    album = None
+    if len(pl_ids) == 1:
+        pl = pl_ids.pop()
+        with _albums_lock:   # you said it's music: ask again even if it didn't look like an album
+            cache = _read_json(ALBUMS_FILE, {})
+            if cache.get(pl, {}).get("none"):
+                cache.pop(pl)
+                _write_json(ALBUMS_FILE, cache)
+        album = _identify_album(pl, title, entries)
+    if not album:
+        g = _guess_album(title, entries) or {}
+        counts: dict[str, int] = {}
+        for _, m in metas:
+            counts[_channel_of(m)] = counts.get(_channel_of(m), 0) + 1
+        artist = g.get("artist") or max(counts, key=counts.get, default="Unknown")
+        album = {"artist": artist, "album": g.get("album") or title, "year": g.get("year"), "tracks": {},
+                 "guess_artist": artist, "guess_album": g.get("album") or title}
+    adir, folder, year = _album_folder(album["artist"], album["album"], album.get("year"), None)
+    new_key = f"Music/{adir}/{folder}"
+    for n, (p, m) in enumerate(metas, 1):
+        t = album["tracks"].get(m.get("id")) or {
+            "no": None if album.get("mbid") else (_position(p) or n),
+            "title": m.get("track") or _local_title(m.get("title") or _display_title(p.name),
+                                                     album.get("guess_artist"), album.get("guess_album"))}
+        no = t.get("no")
+        name = _move_file(p, f"{new_key}/{int(no):02d} - {_clean(t['title'])}" if no else f"{new_key}/{_clean(t['title'])}",
+                          {"section": "Music", "album_artist": adir, "album": album["album"],
+                           "track_number": no, "track": t["title"], "release_year": year},
+                          {"title": t["title"], "artist": adir, "albumartist": adir, "album": album["album"],
+                           "tracknumber": no, "date": year})
+        if p.suffix.lower() in AUDIO_EXTS:
+            _fetch_lyrics_bg(DOWNLOAD_DIR / name)
+    _carry_folder(key, new_key, album["album"])
+    if album.get("mbid"):
+        _album_cover(new_key, album)
+    return new_key
+
+
+def _carry_folder(old: str, new: str, title: str | None) -> None:
+    """A collection moved whole keeps its record (link, chosen cover) under the new folder."""
+    with _meta_lock:
+        folders = _folders()
+        entry = folders.pop(old, None) or {}
+        if entry.get("cover") or entry.get("cover_file") or entry.get("url"):
+            target = folders.setdefault(new, {})
+            for k in ("url", "cover", "cover_file"):
+                if entry.get(k) and not target.get(k):
+                    target[k] = entry[k]
+            if title:
+                target.setdefault("title", title)
+        _write_json(FOLDERS_FILE, folders)
+
+
+@app.post("/api/move")
+def api_move():
+    """Move a file (`name`) or a whole collection (`key`) to Music or to the video side."""
+    data = request.get_json(force=True, silent=True) or {}
+    to = data.get("to")
+    if to not in ("Music", "Videos"):
+        return jsonify(error="Move it to Music or Videos."), 400
+    with _tidy_lock:
+        if data.get("name"):
+            path = _safe_path(data["name"])
+            if path is None:
+                return jsonify(error="File not found."), 404
+            if (_rel(path).split("/")[0] == "Music") == (to == "Music"):
+                return jsonify(name=_rel(path))
+            name = _to_music_single(path) if to == "Music" else _to_videos(path)
+            _forget_gone_folders()
+            return jsonify(name=name)
+
+        src = _safe_path(data.get("key") or "", dir_ok=True)
+        if src is None:
+            return jsonify(error="Collection not found."), 404
+        key = _rel(src)
+        c = _collection_info(key)
+        if c["kind"] not in ("album", "singles", "channel", "playlist"):
+            return jsonify(error="That folder can't be moved."), 400
+        if (c["section"] == "Music") == (to == "Music"):
+            return jsonify(key=key)
+        files = _media_in(src)
+        if c["kind"] == "album":   # → a playlist folder, in album order
+            base = folder = f"Playlists/{_clean(c['title'])}"
+            n = 2
+            while (DOWNLOAD_DIR / folder).exists():
+                folder, n = f"{base} ({n})", n + 1
+            for n, p in enumerate(sorted(files, key=lambda p: (_position(p) or 10**6, p.name)), 1):
+                _to_videos(p, folder, _position(p) or n)
+            _carry_folder(key, folder, c["title"])
+            new_key = folder
+        elif c["kind"] == "singles":
+            new_key = None
+            for p in files:
+                new_key = Path(_to_videos(p)).parent.as_posix()
+        elif c["kind"] == "channel":
+            new_key = None
+            for p in files:
+                new_key = Path(_to_music_single(p)).parent.as_posix()
+        else:
+            new_key = _playlist_to_album(src, key)
+        _prune_empty_dirs(src)
+        _forget_gone_folders()
+        return jsonify(key=new_key)
+
+
 # ---------------------------------------------------------------- media
 
 def _file_body(f, length: int):
@@ -3099,6 +3617,12 @@ def spa(path: str = ""):
     return send_from_directory(WEB_DIST, "index.html", max_age=0)
 
 
+# ---------------------------------------------------------------- background threads
+threading.Thread(target=_indexer.run, daemon=True, name="indexer").start()
+threading.Thread(target=_jobs_publisher, daemon=True, name="jobs-events").start()
+threading.Thread(target=_startup, daemon=True, name="migrate").start()
+
+
 if __name__ == "__main__":
     app.run(
         host=os.environ.get("TUBEGRAB_HOST", "0.0.0.0"),
@@ -3106,9 +3630,3 @@ if __name__ == "__main__":
         debug=False,
         threaded=True,
     )
-
-
-# ---------------------------------------------------------------- background threads
-threading.Thread(target=_indexer.run, daemon=True, name="indexer").start()
-threading.Thread(target=_jobs_publisher, daemon=True, name="jobs-events").start()
-threading.Thread(target=_startup, daemon=True, name="migrate").start()

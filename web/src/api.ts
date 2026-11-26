@@ -204,6 +204,9 @@ export const api = {
     body.append("file", file);
     return req("/api/collections/cover/upload", { method: "POST", body });
   },
+  /** a file (`name`) or a whole collection (`key`) → Music, or the video side */
+  move: (target: { name: string } | { key: string }, to: "Music" | "Videos") =>
+    req<{ name?: string; key?: string | null }>("/api/move", post({ ...target, to })),
   editCollection: (key: string, fields: { title?: string; artist?: string; year?: string }) =>
     req<{ key: string }>("/api/collections/edit", post({ key, ...fields })).then((r) => r.key),
 };

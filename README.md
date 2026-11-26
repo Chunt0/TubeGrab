@@ -30,7 +30,7 @@ Set `TUBEGRAB_HOST` / `TUBEGRAB_PORT` to change the binding.
   Music/<Artist>/<Album (Year)>/01 - Track.m4a    audio: album tracks & singles
   Music/<Artist>/Singles/Track.m4a                audio without album info
   Videos/<Channel>/Title.mp4                      single videos
-  Playlists/<Playlist>/001 - Title.mp4            any other playlist
+  Playlists/<Playlist>/001 - Title.mp4            any other video playlist
   .meta/                                          id index, metadata, thumbnails
   ```
 
@@ -39,6 +39,13 @@ Set `TUBEGRAB_HOST` / `TUBEGRAB_PORT` to change the binding.
   moves into its numbered album slot when you later grab the album. If YouTube
   got a name wrong, **Edit** on the album/channel/playlist page renames the
   folder and rewrites the tags.
+
+  Audio is always music. A playlist of fan uploads ("Artist – Album (full
+  album)") is recognised as one album and checked against MusicBrainz (free,
+  open; only the guessed artist and album name are sent) for the real track
+  names, numbers, year and cover. The odd lecture grabbed as audio: **Move to
+  Videos** in its `⋯` menu (and **Move to Music** the other way), for one item
+  or a whole album/playlist; tidying never moves it back.
 
 ## Run on a Synology NAS (Docker)
 

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ExternalLink, Image as ImageIcon, ListPlus, Pencil, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ExternalLink, Film, Image as ImageIcon, ListPlus, Music, Pencil, Trash2, Upload } from "lucide-react";
 import { Confirm, Menu, MenuDivider, MenuItem } from "../components/ui";
 import { CoverPicker } from "../components/CoverPicker";
 import { useStore, useWatchedCount } from "../store";
-import { Link, artistPath, useRouter, watchPath } from "../router";
+import { Link, artistPath, collectionPath, useRouter, watchPath } from "../router";
 import { api, collectionCoverUrl, urls, type Collection, type LibraryFile } from "../api";
 import { bytes, longDuration } from "../lib/format";
 import { VideoCard } from "../components/VideoCard";
@@ -18,10 +18,11 @@ const DELETE_LABEL: Record<Collection["kind"], string> = {
   album: "Delete album…", singles: "Delete singles…", channel: "Delete channel…", playlist: "Delete all videos…", folder: "Delete folder…",
 };
 
-function Actions({ c, onEdit, onCover, onUpload, onDelete }:
-  { c: Collection; onEdit: () => void; onCover: () => void; onUpload: () => void; onDelete: () => void }) {
+function Actions({ c, onEdit, onCover, onUpload, onDelete, onMove }:
+  { c: Collection; onEdit: () => void; onCover: () => void; onUpload: () => void; onDelete: () => void; onMove: () => void }) {
   const { navigate } = useRouter();
   const { openAddToPlaylist, toast } = useStore();
+  const toMusic = c.section !== "Music";
   const shuffle = async () => {
     const n = await api.random({ dir: c.key }).catch(() => null);
     if (n) navigate(watchPath(n));
@@ -50,6 +51,9 @@ function Actions({ c, onEdit, onCover, onUpload, onDelete }:
             {c.count > 1 && <MenuItem icon={ImageIcon} onClick={() => { close(); onCover(); }}>Choose cover…</MenuItem>}
             <MenuItem icon={Upload} onClick={() => { close(); onUpload(); }}>Upload picture…</MenuItem>
             <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>Edit details…</MenuItem>
+            <MenuItem icon={toMusic ? Music : Film} onClick={() => { close(); onMove(); }}>
+              {toMusic ? "Move to Music" : "Move to Videos"}
+            </MenuItem>
             {c.url && <MenuItem icon={ExternalLink} href={c.url} target="_blank" onClick={close}>Open on YouTube</MenuItem>}
             <MenuDivider />
             <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>{DELETE_LABEL[c.kind]}</MenuItem>
@@ -61,7 +65,7 @@ function Actions({ c, onEdit, onCover, onUpload, onDelete }:
 }
 
 export function CollectionPage({ name: key }: { name: string }) {
-  const { library, setCover, uploadCollectionCover, deleteCollection, toast } = useStore();
+  const { library, setCover, uploadCollectionCover, deleteCollection, move, toast } = useStore();
   const upload = useRef<HTMLInputElement>(null);
   const onUpload = async (file: File | undefined) => {
     if (!file || !c) return;
@@ -76,18 +80,27 @@ export function CollectionPage({ name: key }: { name: string }) {
   const [editing, setEditing] = useState(false);
   const [picking, setPicking] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [moving, setMoving] = useState(false);
   const c = library?.collections.find((x) => x.key === key);
   const music = c ? c.section === "Music" : key.startsWith("Music/");
   // albums: every track at once (they're short); channels: as you scroll
   const { items, sentinel } = usePaged<LibraryFile>(urls.files({ dir: key }), music ? 1000 : 60);
   const watched = useWatchedCount(key);
 
-  useEffect(() => { if (library?.ready && !c && !editing) navigate(music ? "/music" : "/videos", true); }, [library, c, editing, music, navigate]);
+  useEffect(() => { if (library?.ready && !c && !editing && !moving) navigate(music ? "/music" : "/videos", true); }, [library, c, editing, moving, music, navigate]);
   useEffect(() => {
     if (c) document.title = c.artist ? `${c.title} · ${c.artist}` : c.title;
     return () => { document.title = "Library"; };
   }, [c]);
   if (!c) return null;
+
+  const onMove = async () => {
+    if (moving) return;
+    setMoving(true);
+    const to = await move({ key: c.key }, music ? "Videos" : "Music");
+    setMoving(false);
+    if (to) navigate(collectionPath(to), true);
+  };
 
   const back = music
     ? { to: c.artist ? artistPath(c.artist) : "/music", label: c.artist ?? "Music" }
@@ -115,7 +128,7 @@ export function CollectionPage({ name: key }: { name: string }) {
             <h1 className="mt-1 text-2xl font-medium leading-tight tracking-tight">{c.kind === "singles" ? "Singles" : c.title}</h1>
             {c.artist && <Link to={artistPath(c.artist)} className="mt-1 block text-[15px] text-fg/80 hover:text-white hover:underline">{c.artist}</Link>}
             {stats}
-            <div className="mt-5"><Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} /></div>
+            <div className="mt-5"><Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} onMove={onMove} /></div>
           </div>
           <div className="min-w-0 md:pt-1">
             <div className="border-t border-line">
@@ -135,7 +148,7 @@ export function CollectionPage({ name: key }: { name: string }) {
               <h1 className="mt-1 text-2xl font-medium tracking-tight sm:text-3xl">{c.title}</h1>
               {stats}
             </div>
-            <Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} />
+            <Actions c={c} onEdit={() => setEditing(true)} onCover={() => setPicking(true)} onUpload={() => upload.current?.click()} onDelete={() => setDeleting(true)} onMove={onMove} />
           </header>
           <div className={`mt-6 ${GRID}`}>
             {items.map((f, i) => <VideoCard key={f.name} file={f} position={c.kind === "playlist" ? f.index ?? i + 1 : null} showChannel={c.kind === "playlist"} />)}

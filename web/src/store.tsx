@@ -20,6 +20,8 @@ interface Store {
   setCover: (key: string, name: string) => Promise<void>;
   uploadCollectionCover: (key: string, file: File) => Promise<void>;
   deleteCollection: (c: Collection) => Promise<void>;
+  /** to Music, or to the video side; resolves to the new name (file) or key (collection) */
+  move: (target: { name: string } | { key: string }, to: "Music" | "Videos") => Promise<string | null>;
   /** resume position + watched, by library name */
   progress: Record<string, Progress>;
   noteProgress: (name: string, p: Partial<Progress>) => void;
@@ -146,6 +148,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     toast({ kind: "info", title: `Deleted ${c.kind === "singles" ? `${c.artist} · Singles` : c.title}`, body: `${r.deleted} ${r.deleted === 1 ? "file" : "files"}` });
   }, [refresh, toast]);
 
+  const move = useCallback(async (target: { name: string } | { key: string }, to: "Music" | "Videos") => {
+    try {
+      const r = await api.move(target, to);
+      await fetchQuery(urls.library).catch(() => {});
+      refresh();
+      toast({ kind: "ok", title: `Moved to ${to}` });
+      return r.name ?? r.key ?? null;
+    } catch (e) {
+      toast({ kind: "bad", title: "Couldn't move", body: e instanceof Error ? e.message : String(e) });
+      return null;
+    }
+  }, [refresh, toast]);
+
   const uploadCollectionCover = useCallback(async (key: string, file: File) => {
     await api.uploadCollectionCover(key, file);
     refresh();
@@ -215,7 +230,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={{
       library: lib.data ?? null, jobs, activeCount: jobs.filter(isActive).length, refresh,
-      grab, cancel, remove, editCollection, setCover, uploadCollectionCover, deleteCollection,
+      grab, cancel, remove, editCollection, setCover, uploadCollectionCover, deleteCollection, move,
       progress, noteProgress, setWatched,
       playlists: pls.data?.playlists ?? [], playlistsLoaded: !!pls.data,
       createPlaylist, updatePlaylist, deletePlaylist, uploadPlaylistCover, addTarget, openAddToPlaylist, closeAddToPlaylist,

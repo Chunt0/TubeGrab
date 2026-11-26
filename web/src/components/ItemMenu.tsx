@@ -1,4 +1,4 @@
-import { CheckCheck, ListPlus, RotateCcw } from "lucide-react";
+import { CheckCheck, Film, ListPlus, Music, RotateCcw } from "lucide-react";
 import { resumable, type LibraryFile } from "../api";
 import { useStore } from "../store";
 import { cx } from "../lib/format";
@@ -6,7 +6,8 @@ import { Menu, MenuItem } from "./ui";
 
 /** Per-track / per-video "⋯" (hover on desktop, always there on touch screens). */
 export function ItemMenu({ file, className }: { file: LibraryFile; className?: string }) {
-  const { openAddToPlaylist, progress, setWatched } = useStore();
+  const { openAddToPlaylist, progress, setWatched, move } = useStore();
+  const toMusic = file.section !== "Music";
   const watched = !!progress[file.name]?.watched;
   return (
     <Menu className={cx("opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100", className)}>
@@ -18,6 +19,9 @@ export function ItemMenu({ file, className }: { file: LibraryFile; className?: s
               {watched ? "Mark as unwatched" : "Mark as watched"}
             </MenuItem>
           )}
+          <MenuItem icon={toMusic ? Music : Film} onClick={() => { close(); move({ name: file.name }, toMusic ? "Music" : "Videos"); }}>
+            {toMusic ? "Move to Music" : "Move to Videos"}
+          </MenuItem>
         </>
       )}
     </Menu>
