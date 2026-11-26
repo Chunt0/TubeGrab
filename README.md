@@ -138,3 +138,18 @@ rights to download. This tool is for personal archival of your own content.
 | `downloads/` | Library (`TUBEGRAB_DOWNLOADS`); `.meta/` holds metadata, thumbnails, caches |
 | `run.sh` | venv bootstrap + launch (local) |
 | `Dockerfile`, `docker/entrypoint.sh`, `docker-compose.yml` | container build + NAS deployment |
+
+## Deploying updates (git push → NAS)
+
+The NAS holds a bare repo at `/volume1/git/tubegrab.git`. Its `post-receive`
+hook checks `main` out into `/volume1/docker/tubegrab` (the Container Manager
+project), rebuilds the image and restarts the container; build output shows
+up in your terminal. A failed build leaves the running version alone.
+
+```sh
+git commit -am "…"
+git push            # remote "nas" = ssh://root@192.168.254.10/volume1/git/tubegrab.git
+```
+
+Roll back with `git revert <commit> && git push`.
+
