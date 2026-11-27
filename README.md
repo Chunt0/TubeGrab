@@ -161,7 +161,8 @@ rights to download. This tool is for personal archival of your own content.
 
 | Path | Purpose |
 | --- | --- |
-| `app.py` | Flask backend: jobs, yt-dlp workers, streaming + thumbnails, file library API; serves `web/dist` |
+| `app.py` | Entry point (`gunicorn app:app`, `./run.sh`): starts the server and its background threads |
+| `tubegrab/` | The backend, one module per area; the map of modules and their layers is in `tubegrab/__init__.py` |
 | `web/` | React + TypeScript UI (Vite, Tailwind, bun). `src/pages/` has Library, Watch, Downloads |
 | `static/placeholder.svg` | Fallback thumbnail |
 | `downloads/` | Library (`TUBEGRAB_DOWNLOADS`); `.meta/` holds metadata, thumbnails, caches |
@@ -177,8 +178,8 @@ rights to download. This tool is for personal archival of your own content.
 ```
 
 Each test gets an empty throwaway library; MusicBrainz, LRCLIB and the
-background threads are off. A push deploys, so `git push` runs them (and the
-UI type check) first and stops if anything fails; `git push --no-verify` skips
+background threads are off. A push deploys, so `git push` runs them (plus
+pyflakes and the UI type check) first and stops if anything fails; `git push --no-verify` skips
 that. The hook lives in `.githooks/`; a fresh clone enables it with
 `git config core.hooksPath .githooks`.
 
@@ -191,7 +192,8 @@ up in your terminal. A failed build leaves the running version alone.
 
 ```sh
 git commit -am "…"
-git push            # remote "nas" = ssh://root@192.168.254.10/volume1/git/tubegrab.git
+git push            # GitHub (origin)
+git push nas main   # deploys: ssh://root@192.168.254.10/volume1/git/tubegrab.git
 ```
 
 Roll back with `git revert <commit> && git push`.

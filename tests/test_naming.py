@@ -1,13 +1,13 @@
 """Where a download is filed (_plan) and the name helpers it uses."""
 import pytest
 
-import app as tg
+from tubegrab import naming
 
 PL = "PLxxxxxxxxxxxxxxxx"
 
 
 def plan(info, *, audio=True, playlist=False, album=None):
-    return tg._plan({"id": "vid00000001", **info}, audio=audio, playlist_mode=playlist, album=album)
+    return naming._plan({"id": "vid00000001", **info}, audio=audio, playlist_mode=playlist, album=album)
 
 
 # ---------------------------------------------------------------- helpers
@@ -25,17 +25,17 @@ def plan(info, *, audio=True, playlist=False, album=None):
     ("line\nbreak", "line break"),
 ])
 def test_clean(raw, want):
-    assert tg._clean(raw) == want
+    assert naming._clean(raw) == want
 
 
 def test_clean_limits_length():
-    assert len(tg._clean("x" * 300)) == 120
+    assert len(naming._clean("x" * 300)) == 120
 
 
 def test_clean_channel_drops_topic():
-    assert tg._clean_channel("Coldsteel - Topic") == "Coldsteel"
-    assert tg._clean_channel("Topic Talks") == "Topic Talks"
-    assert tg._clean_channel(None) is None
+    assert naming._clean_channel("Coldsteel - Topic") == "Coldsteel"
+    assert naming._clean_channel("Topic Talks") == "Topic Talks"
+    assert naming._clean_channel(None) is None
 
 
 @pytest.mark.parametrize("info, want", [
@@ -45,7 +45,7 @@ def test_clean_channel_drops_topic():
     ({}, None),
 ])
 def test_year(info, want):
-    assert tg._year(info) == want
+    assert naming._year(info) == want
 
 
 @pytest.mark.parametrize("info, want", [
@@ -57,7 +57,7 @@ def test_year(info, want):
     ({}, None),
 ])
 def test_artist(info, want):
-    assert tg._artist(info) == want
+    assert naming._artist(info) == want
 
 
 @pytest.mark.parametrize("title, artist, want", [
@@ -70,13 +70,13 @@ def test_artist(info, want):
     ("(Official Video)", None, "(Official Video)"),   # nothing left: keep the original
 ])
 def test_track_title(title, artist, want):
-    assert tg._track_title(title, artist) == want
+    assert naming._track_title(title, artist) == want
 
 
 def test_artist_dir_reuses_existing_spelling(lib):
     (lib / "Music" / "MELVINS").mkdir(parents=True)
-    assert tg._artist_dir("Melvins") == "MELVINS"
-    assert tg._artist_dir("Primus") == "Primus"
+    assert naming._artist_dir("Melvins") == "MELVINS"
+    assert naming._artist_dir("Primus") == "Primus"
 
 
 # ---------------------------------------------------------------- music
@@ -180,7 +180,7 @@ def test_identified_album_entry():
 
 
 def test_identified_album_entry_not_on_the_release():
-    p = tg._plan({"id": "vid00000099", "title": "Primus - Bonus Jam - Frizzle Fry", "playlist_id": PL, "playlist_index": 15},
+    p = naming._plan({"id": "vid00000099", "title": "Primus - Bonus Jam - Frizzle Fry", "playlist_id": PL, "playlist_index": 15},
                  audio=True, playlist_mode=True, album=FRIZZLE)
     assert p["rel"] == "Music/Primus/Frizzle Fry (1990)/Bonus Jam"
 

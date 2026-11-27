@@ -4,8 +4,14 @@
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import pytest" 2>/dev/null; then
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import pytest, pyflakes" 2>/dev/null; then
     echo "pre-push: no test setup. Run: ./run.sh once, then .venv/bin/pip install -r requirements-dev.txt" >&2
+    exit 1
+fi
+
+echo "pre-push: checking for undefined and unused names…"
+if ! .venv/bin/python -m pyflakes app.py tubegrab tests; then
+    echo "pre-push: pyflakes found problems, not pushing." >&2
     exit 1
 fi
 

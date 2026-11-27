@@ -23,6 +23,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 COPY app.py docker/entrypoint.sh ./
+COPY tubegrab ./tubegrab
 COPY static ./static
 COPY --from=web /web/dist ./web/dist
 

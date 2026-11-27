@@ -2,14 +2,14 @@
 tidy-up that runs at startup leaving your moves alone."""
 import json
 
-import app as tg
+from tubegrab import maintenance, meta
 from conftest import add_file, reindex
 
 PL = "PLfanfanfanfanfan"
 
 
-def meta(vid):
-    return tg._meta_for(vid)
+def meta_of(vid):
+    return meta._meta_for(vid)
 
 
 def move(client, to, **target):
@@ -28,9 +28,9 @@ def test_lecture_downloaded_as_audio_moves_to_videos_and_back(client, lib):
     add_file("Music/Uni/Singles/Lecture 3.m4a", "lecture0003", title="Lecture 3", uploader="Uni")
     assert move(client, "Videos", name="Music/Uni/Singles/Lecture 3.m4a") == {"name": "Videos/Uni/Lecture 3.m4a"}
     assert files(lib) == ["Videos/Uni/Lecture 3.m4a"]
-    assert tg._index()["lecture0003:audio"] == "Videos/Uni/Lecture 3.m4a"
-    assert meta("lecture0003")["placed"] == "user"
-    assert meta("lecture0003")["section"] == "Videos"
+    assert meta._index()["lecture0003:audio"] == "Videos/Uni/Lecture 3.m4a"
+    assert meta_of("lecture0003")["placed"] == "user"
+    assert meta_of("lecture0003")["section"] == "Videos"
 
     assert move(client, "Music", name="Videos/Uni/Lecture 3.m4a") == {"name": "Music/Uni/Singles/Lecture 3.m4a"}
     assert files(lib) == ["Music/Uni/Singles/Lecture 3.m4a"]
@@ -40,7 +40,7 @@ def test_album_track_goes_back_into_its_album(client, lib):
     (lib / "Music/Primus/Frizzle Fry (1990)").mkdir(parents=True)
     add_file("Videos/Primus/Too Many Puppies.m4a", "puppies0003", title="Too Many Puppies", track="Too Many Puppies",
              artist="Primus", album="Frizzle Fry")
-    tg._write_meta({"id": "puppies0003"}, {"track_number": 3})
+    meta._write_meta({"id": "puppies0003"}, {"track_number": 3})
     assert move(client, "Music", name="Videos/Primus/Too Many Puppies.m4a")["name"] == \
         "Music/Primus/Frizzle Fry (1990)/03 - Too Many Puppies.m4a"
 
@@ -48,7 +48,7 @@ def test_album_track_goes_back_into_its_album(client, lib):
 def test_moving_to_where_it_already_is_does_nothing(client, lib):
     add_file("Music/Uni/Singles/Lecture 3.m4a", "lecture0003", title="Lecture 3", uploader="Uni")
     assert move(client, "Music", name="Music/Uni/Singles/Lecture 3.m4a") == {"name": "Music/Uni/Singles/Lecture 3.m4a"}
-    assert "placed" not in meta("lecture0003")
+    assert "placed" not in meta_of("lecture0003")
 
 
 def test_move_does_not_overwrite_another_file(client, lib):
@@ -73,13 +73,13 @@ def test_move_refuses_bad_requests(client):
 def test_album_to_videos_becomes_a_playlist_in_album_order(client, lib):
     for n, t in ((2, "Ground Hog's Day"), (1, "To Defy the Laws of Tradition"), (3, "Too Many Puppies")):
         add_file(f"Music/Primus/Frizzle Fry (1990)/{n:02d} - {t}.m4a", f"frizzle{n:04d}", title=t, uploader="Fan")
-    tg._note_folder("Music/Primus/Frizzle Fry (1990)", "Frizzle Fry", "https://example.com/pl")
+    meta._note_folder("Music/Primus/Frizzle Fry (1990)", "Frizzle Fry", "https://example.com/pl")
     assert move(client, "Videos", key="Music/Primus/Frizzle Fry (1990)") == {"key": "Playlists/Frizzle Fry"}
     assert files(lib) == ["Playlists/Frizzle Fry/001 - To Defy the Laws of Tradition.m4a",
                           "Playlists/Frizzle Fry/002 - Ground Hog's Day.m4a",
                           "Playlists/Frizzle Fry/003 - Too Many Puppies.m4a"]
-    assert tg._folders()["Playlists/Frizzle Fry"]["url"] == "https://example.com/pl"
-    assert "Music/Primus/Frizzle Fry (1990)" not in tg._folders()
+    assert meta._folders()["Playlists/Frizzle Fry"]["url"] == "https://example.com/pl"
+    assert "Music/Primus/Frizzle Fry (1990)" not in meta._folders()
 
 
 def test_album_to_videos_does_not_merge_into_an_existing_playlist(client, lib):
@@ -107,14 +107,14 @@ def test_fan_playlist_to_music_becomes_its_album(client, lib):
     for i, t in enumerate(titles, 1):
         add_file(f"Playlists/Primus - Frizzle Fry (Full Album)/{i:03d} - {t}.m4a", f"fan{i:08d}", title=t,
                  uploader="Fan", playlist_id=PL, playlist_index=i)
-    tg._note_folder("Playlists/Primus - Frizzle Fry (Full Album)", "Primus - Frizzle Fry (Full Album)", None)
+    meta._note_folder("Playlists/Primus - Frizzle Fry (Full Album)", "Primus - Frizzle Fry (Full Album)", None)
     key = move(client, "Music", key="Playlists/Primus - Frizzle Fry (Full Album)")["key"]
     assert key == "Music/Primus/Frizzle Fry"
     assert files(lib) == ["Music/Primus/Frizzle Fry/01 - To Defy The Laws Of Tradition.m4a",
                           "Music/Primus/Frizzle Fry/02 - Ground Hog's Day.m4a",
                           "Music/Primus/Frizzle Fry/03 - Too Many Puppies.m4a"]
-    assert meta("fan00000002")["album"] == "Frizzle Fry"
-    assert meta("fan00000002")["track_number"] == 2
+    assert meta_of("fan00000002")["album"] == "Frizzle Fry"
+    assert meta_of("fan00000002")["track_number"] == 2
 
 
 def test_playlist_to_music_named_after_the_playlist(client, lib):
@@ -135,7 +135,7 @@ def test_tidy_does_not_move_your_playlist_back_into_music(client, lib):
     move(client, "Videos", key="Music/Primus/Frizzle Fry")
     before = files(lib)
     assert all(f.startswith("Playlists/") for f in before)
-    tg.tidy_music()
+    maintenance.tidy_music()
     assert files(lib) == before
 
 
@@ -143,8 +143,8 @@ def test_tidy_refiles_old_playlist_songs_into_their_album(lib):
     # what an older version did: songs YouTube knows, filed under Playlists/
     add_file("Playlists/Road trip/001 - Tommy the Cat.m4a", "tommycat001", title="Tommy the Cat", track="Tommy the Cat",
              artist="Primus", album="Sailing the Seas of Cheese", release_year=1991, playlist_id=PL, playlist_index=1)
-    tg._write_meta({"id": "tommycat001"}, {"track_number": 3})
-    tg.tidy_music()
+    meta._write_meta({"id": "tommycat001"}, {"track_number": 3})
+    maintenance.tidy_music()
     assert files(lib) == ["Music/Primus/Sailing the Seas of Cheese (1991)/03 - Tommy the Cat.m4a"]
 
 
@@ -155,11 +155,11 @@ def test_tidy_merges_artist_and_album_spellings(lib):
              artist="Melvins", release_year=1993)
     add_file("Music/Melvins/Houdini (1993)/03 - Lizzy.m4a", "lizzy000001", title="Lizzy", track="Lizzy",
              artist="Melvins", release_year=1993)
-    tg.tidy_music()
+    maintenance.tidy_music()
     assert files(lib) == ["Music/Melvins/Houdini (1993)/01 - Hooch.m4a",
                           "Music/Melvins/Houdini (1993)/02 - Night Goat.m4a",
                           "Music/Melvins/Houdini (1993)/03 - Lizzy.m4a"]
-    assert tg._index()["hooch000001:audio"] == "Music/Melvins/Houdini (1993)/01 - Hooch.m4a"
+    assert meta._index()["hooch000001:audio"] == "Music/Melvins/Houdini (1993)/01 - Hooch.m4a"
 
 
 # ---------------------------------------------------------------- the library sees it
