@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Queue downloads on a TubeGrab server from the command line.
+
+    grab links.txt                 each line of the file: one link (audio)
+    grab -v links.txt more.txt     video
+    grab -p https://youtube.com/playlist?list=…   the whole playlist
+    pbpaste | grab -v              links from stdin
+    grab -w links.txt              wait, printing each job as it finishes
+    grab -p --slow albums.txt      a long list: one at a time, a pause between
+
+Arguments are files of links or links themselves. In a file, blank lines and
+lines starting with # are skipped. The server downloads 2 at a time and queues
+the rest. Server: --server, else $TUBEGRAB_URL, else the NAS on the LAN.
+
+--slow is for lists too long for YouTube's limit (about 300 videos an hour from
+one connection). grab then keeps the list itself: it sends one link, waits for
+it to finish and pauses before the next, so it has to keep running (nohup,
+tmux). When YouTube limits it anyway it waits an hour and tries that link
+again; when the server is down (a deploy, a reboot) it waits for it. Finished
+links go into <file>.done next to each file, and a rerun skips them.
+Standard library only, so it runs anywhere with Python 3.8+.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_SERVER = "http://192.168.254.10:8765"
+ACTIVE = ("queued", "downloading")
+RATE_LIMITED = ("try again later", "rate-limit", "rate limit", "http error 429", "not a bot")
+LIMIT_WAIT = 3600      # YouTube's limit lasts "up to an hour"
+LIMIT_TRIES = 5
+_sleep = time.sleep    # (tests replace it)
+
+
+def read_links(sources, stdin):
+    """[(link, its file's .done path or None)] from files, literal links and
+    stdin, in order, without repeats."""
+    lines = []
+    for src in sources:
+        if src == "-":
+            lines += [(line, None) for line in stdin.read().splitlines()]
+        elif src.lower().startswith(("http://", "https://")):
+            lines.append((src, None))
+        else:
+            with open(src, encoding="utf-8") as fh:
+                lines += [(line, src + ".done") for line in fh.read().splitlines()]
+    seen, links = set(), []
+    for line, done in lines:
+        line = line.strip()
+        if line and not line.startswith("#") and line not in seen:
+            seen.add(line)
+            links.append((line, done))
+    return links
+
+
+def unfinished(links):
+    """The links not yet in their file's .done."""
+    done = set()
+    for path in {d for _, d in links if d and os.path.exists(d)}:
+        with open(path, encoding="utf-8") as fh:
+            done.update(line.strip() for line in fh)
+    return [(url, d) for url, d in links if url not in done]
+
+
+def call(server, path, body=None):
+    req = urllib.request.Request(
+        server.rstrip("/") + path,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="GET" if body is None else "POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:   # the server's own message ("Unknown format.")
+        try:
+            msg = json.loads(e.read()).get("error")
+        except ValueError:
+            msg = None
+        raise RuntimeError(msg or f"HTTP {e.code}") from None
+
+
+def label(job):
+    return job.get("title") or job["url"]
+
+
+def wait(server, ids, out, poll=2.0):
+    """Print each job as it finishes; True if all of them worked."""
+    left, ok = set(ids), True
+    while left:
+        _sleep(poll)
+        jobs = {j["id"]: j for j in call(server, "/api/jobs")["jobs"]}
+        for jid in sorted(left):
+            job = jobs.get(jid)
+            if job is None:            # the server restarted and forgot it
+                print(f"?  lost track of job {jid}", file=out)
+                left.discard(jid)
+                ok = False
+            elif job["status"] not in ACTIVE:
+                left.discard(jid)
+                if job["status"] == "complete":
+                    print(f"✓  {label(job)}  ({len(job.get('files') or [])} files)", file=out)
+                else:
+                    ok = False
+                    print(f"✗  {label(job)}: {job.get('error') or job['status']}", file=out)
+    return ok
+
+
+def say(out, msg):
+    print(f"{time.strftime('%H:%M')}  {msg}", file=out, flush=True)
+
+
+def patient(server, path, body, out):
+    """call(), waiting out a server that is down (a deploy takes ~40 s, a reboot minutes)."""
+    down = False
+    while True:
+        try:
+            return call(server, path, body)
+        except urllib.error.URLError as e:
+            if not down:
+                say(out, f"…  can't reach {server} ({e.reason}); trying every minute")
+                down = True
+            _sleep(60)
+
+
+def finished(server, jid, out, poll=5.0):
+    """The job once it's done, or None if the server forgot it (restarted)."""
+    while True:
+        _sleep(poll)
+        job = next((j for j in patient(server, "/api/jobs", None, out)["jobs"] if j["id"] == jid), None)
+        if job is None or job["status"] not in ACTIVE:
+            return job
+
+
+def slow(server, links, fmt, playlist, pause, out):
+    """One link at a time with `pause` seconds between; returns the links that failed."""
+    failed = []
+    for n, (url, done) in enumerate(links, 1):
+        if n > 1:
+            _sleep(pause)
+        say(out, f"[{n}/{len(links)}] {url}")
+        tries = 0
+        while True:
+            try:
+                job = patient(server, "/api/download", {"url": url, "format": fmt, "playlist": playlist}, out)["job"]
+            except RuntimeError as e:
+                say(out, f"✗  {e}")
+                failed.append(url)
+                break
+            job = finished(server, job["id"], out)
+            if job is None:
+                say(out, "…  the server restarted mid-download; starting it again")
+                continue
+            msg = job.get("error") or job["status"]
+            limited = job["status"] in ("complete", "error") and any(k in msg.lower() for k in RATE_LIMITED)
+            if limited and tries < LIMIT_TRIES:   # (an album YouTube cut short is "complete" too)
+                tries += 1
+                say(out, f"…  YouTube is limiting downloads; trying again in an hour ({msg[:100]})")
+                _sleep(LIMIT_WAIT)
+                continue
+            if job["status"] == "complete" and not limited:
+                say(out, f"✓  {label(job)}  ({job.get('entry_count') or 0} items)"
+                         + (f"  ⚠ {msg[:100]}" if job.get("error") else ""))
+                if done:
+                    with open(done, "a", encoding="utf-8") as fh:
+                        fh.write(url + "\n")
+                break
+            say(out, f"✗  {msg}")
+            failed.append(url)
+            break
+    return failed
+
+
+def main(argv=None, stdin=sys.stdin, out=sys.stdout, err=sys.stderr):
+    ap = argparse.ArgumentParser(prog="grab", description="Queue downloads on a TubeGrab server.")
+    kind = ap.add_mutually_exclusive_group()
+    kind.add_argument("-a", "--audio", dest="format", action="store_const", const="audio",
+                      help="audio, filed as music (the default)")
+    kind.add_argument("-v", "--video", dest="format", action="store_const", const="video", help="video")
+    ap.add_argument("-p", "--playlist", action="store_true",
+                    help="whole playlists, filed together as an album or playlist "
+                         "(otherwise a link inside a playlist gets just that video)")
+    ap.add_argument("-w", "--wait", action="store_true", help="wait until they finish")
+    ap.add_argument("--slow", action="store_true",
+                    help="one at a time with a pause between, for lists too long for YouTube's limit; "
+                         "keeps running until the list is done, and a rerun skips finished links")
+    ap.add_argument("--pause", type=float, default=60, metavar="SECONDS",
+                    help="the pause between links with --slow (default 60)")
+    ap.add_argument("-s", "--server", default=os.environ.get("TUBEGRAB_URL", DEFAULT_SERVER),
+                    help=f"TubeGrab address (default $TUBEGRAB_URL or {DEFAULT_SERVER})")
+    ap.add_argument("sources", nargs="*", metavar="FILE|URL", help="files of links, or links; - for stdin")
+    args = ap.parse_args(argv)
+
+    sources = args.sources or (["-"] if not stdin.isatty() else [])
+    if not sources:
+        ap.error("give a file of links, a link, or pipe links in")
+    try:
+        links = read_links(sources, stdin)
+    except OSError as e:
+        print(f"grab: {e}", file=err)
+        return 2
+    if not links:
+        print("grab: no links", file=err)
+        return 2
+
+    fmt = args.format or "audio"
+    if args.slow:
+        todo = unfinished(links)
+        if len(todo) < len(links):
+            say(out, f"{len(links) - len(todo)} already done, {len(todo)} to go")
+        links = todo
+        if not links:
+            return 0
+        try:
+            failed = slow(args.server, links, fmt, args.playlist, args.pause, out)
+        except KeyboardInterrupt:
+            print("\nstopped (the current download carries on); run it again to go on, finished links are skipped", file=out)
+            return 130
+        say(out, f"{len(links) - len(failed)} done" + (f", {len(failed)} failed:" if failed else ""))
+        for url in failed:
+            print(f"   {url}", file=out)
+        return 1 if failed else 0
+
+    ids, failed = [], 0
+    for url, _ in links:
+        try:
+            job = call(args.server, "/api/download", {"url": url, "format": fmt, "playlist": args.playlist})["job"]
+        except urllib.error.URLError as e:
+            print(f"grab: can't reach {args.server}: {e.reason}", file=err)
+            return 2
+        except RuntimeError as e:
+            failed += 1
+            print(f"✗  {url}: {e}", file=out)
+            continue
+        ids.append(job["id"])
+        print(f"+  {url}", file=out)
+    print(f"{len(ids)} queued ({fmt}{', whole playlists' if args.playlist else ''})"
+          + (f", {failed} refused" if failed else ""), file=out)
+
+    if args.wait and ids:
+        try:
+            if not wait(args.server, ids, out):
+                failed += 1
+        except KeyboardInterrupt:
+            print("\nstopped waiting; the downloads carry on", file=out)
+            return 130
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

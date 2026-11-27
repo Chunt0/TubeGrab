@@ -351,6 +351,7 @@ def _run_job_slot(job_id: str, url: str, fmt: str, playlist: bool) -> None:
             title=info.get("playlist_title") or info.get("title") or url,
             percent=100.0, speed=None, eta=None, current_file=None,
             entry_count=len(entries), finished_at=_now(),
+            error=ydl.last_error,   # a track that failed (bin/grab retries one YouTube rate-limited)
         )
     except yt_dlp.utils.DownloadCancelled:
         _update(job_id, status="cancelled", finished_at=_now())

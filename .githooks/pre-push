@@ -10,7 +10,7 @@ if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import pytest, pyflakes" 
 fi
 
 echo "pre-push: checking for undefined and unused names…"
-if ! .venv/bin/python -m pyflakes app.py tubegrab tests; then
+if ! .venv/bin/python -m pyflakes app.py bin/grab tubegrab tests; then
     echo "pre-push: pyflakes found problems, not pushing." >&2
     exit 1
 fi
