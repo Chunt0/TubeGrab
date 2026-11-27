@@ -191,6 +191,20 @@ running the same command again carries on where it left off.
 It talks to `$TUBEGRAB_URL`, else `http://192.168.254.10:8765`; `-s` overrides
 both. `ln -s "$PWD/bin/grab" ~/.local/bin/grab` puts it on your PATH.
 
+### Playlists by an agent
+
+`.claude/skills/playlist/` is a Claude Code skill: ask an agent for "an hour of
+90s alternative from my library" or "my most played, no more than two songs per
+artist" and it reads the library, picks songs and creates the playlist (you get
+the link). Its `tg.py` works on its own too: `tg.py stats`, `tg.py songs
+--genre jazz --sort plays`, `… | tg.py create "Title" -`. To use it from any
+folder: `ln -s "$PWD/.claude/skills/playlist" ~/.claude/skills/playlist`.
+
+What it knows per song: artist, album, year, length, favorites, how often and
+when you played it (a play: half the song or 4 minutes), and genres, which the
+NAS fetches from MusicBrainz in the background (the album's, else the artist's;
+only names are sent).
+
 ## Legal note
 
 Only download videos you uploaded yourself or that you otherwise have the

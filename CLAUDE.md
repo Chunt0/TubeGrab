@@ -15,6 +15,8 @@ tube.putty-ai.com behind Pangolin, which handles login: don't add app auth.
   the layering.
 - `tubegrab/api/`: Flask routes, one blueprint per area. Keep logic in the modules, not the routes.
 - `web/src/`: `pages/`, `components/`, `api.ts` (every endpoint the UI calls), `store.tsx`.
+- `.claude/skills/playlist/`: the playlist skill for agents (`tg.py` + the API in `reference.md`); linked
+  into `~/.claude/skills/` on agent-sandbox. Keep `reference.md` in step with API changes.
 - `web/public/sw.js`: service worker. Page loads are network-first, so a new build shows on the next load.
 - Library on disk: `Music/<Artist>/<Album (Year)>/NN - Track.m4a`,
   `Music/<Artist>/Singles/`, `Videos/<Channel>/`, `Playlists/<Playlist>/NNN - …`,
@@ -26,7 +28,7 @@ tube.putty-ai.com behind Pangolin, which handles login: don't add app auth.
 ./run.sh                          # local: build UI if needed, serve on :8765
 ./run.sh --dev                    # Flask :8765 + Vite hot reload :5173
 .venv/bin/python -m pytest        # tests (about 2 s, no network)
-.venv/bin/python -m pyflakes app.py bin/grab tubegrab tests
+.venv/bin/python -m pyflakes app.py bin/grab .claude/skills/playlist/tg.py tubegrab tests
 cd web && bun run typecheck
 ```
 

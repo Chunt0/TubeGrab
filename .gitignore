@@ -10,3 +10,6 @@ __pycache__/
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# Claude Code (the playlist skill in .claude/skills is shared; local settings are not)
+.claude/settings.local.json
