@@ -3,6 +3,7 @@ refiling playlist songs into albums, merging artist/album spellings, and
 backfilling captions, chapters and lyrics."""
 
 import shutil
+import threading
 from pathlib import Path
 
 import yt_dlp
@@ -19,6 +20,7 @@ from .naming import _clean, _fold, _plan, _track_title
 from .images import _crop_square, _embed_cover, warm_thumbs
 from .lyrics import backfill_lyrics
 from .albums import _album_cover, _identify_album
+from .genres import backfill_genres
 from .index import _indexer
 from .jobs import _GrabDL
 
@@ -312,4 +314,5 @@ def _startup() -> None:
         print(f"[tubegrab] backfill failed: {exc}")
     backfill_lyrics()
     _indexer.ready.wait()
+    threading.Thread(target=backfill_genres, daemon=True, name="genres").start()
     warm_thumbs()

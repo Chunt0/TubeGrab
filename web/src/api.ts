@@ -58,6 +58,9 @@ export interface LibraryFile {
   lyrics?: "synced" | "plain" | null;
   /** English captions available (CC, transcript, search) */
   subs?: boolean;
+  /** times played (half of it, or 4 minutes) and when last */
+  plays?: number;
+  last_played?: string | null;
 }
 
 /** Enough of a file to draw its thumbnail. */
@@ -83,6 +86,8 @@ export interface Collection {
   art?: string | null;
   /** an uploaded picture, when there is one */
   cover_url?: string | null;
+  /** music: genres from MusicBrainz (the album's, else the artist's) */
+  genres?: string[];
 }
 
 export interface Stat { count: number; size: number; duration: number; audio: number }
@@ -188,6 +193,7 @@ export const api = {
   deletePlaylist: (id: string) => req(`/api/playlists/${id}`, { method: "DELETE" }),
   progress: (name: string, body: { pos?: number; watched?: boolean }) => req("/api/progress", post({ name, ...body })),
   /** fire-and-forget that survives closing the tab */
+  played: (name: string) => req<{ plays: number }>("/api/played", post({ name })),
   progressBeacon: (name: string, pos: number) =>
     navigator.sendBeacon?.("/api/progress", JSON.stringify({ name, pos })) || void api.progress(name, { pos }).catch(() => {}),
   lyrics: (name: string) => req<{ synced: Segment[] | null; plain: string | null }>(`/api/lyrics/${encPath(name)}`),

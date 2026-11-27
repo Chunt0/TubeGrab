@@ -1,12 +1,12 @@
-"""Resume positions and watched flags."""
+"""Resume positions, watched flags and plays."""
 
 import math
 
 from flask import Blueprint, jsonify, request
 
-from ..config import _meta_lock, _now, PROGRESS_FILE
+from ..config import _meta_lock, _now, PLAYS_FILE, PROGRESS_FILE
 from ..events import _lib_bump, _publish
-from ..meta import _progress, _rel, _write_json
+from ..meta import _plays, _progress, _rel, _write_json
 from ..files import _safe_path
 from ..db import _db
 from ..httputil import _cached_json, _json_bytes
@@ -57,3 +57,21 @@ def api_progress():
     if bool(old and old[0]) != bool(entry.get("watched")):
         _lib_bump()   # watched counts on collection cards
     return jsonify(ok=True)
+
+
+@bp.post("/api/played")
+def api_played():
+    """The player heard enough of an item to count it as played once more."""
+    data = request.get_json(force=True, silent=True) or {}
+    path = _safe_path(data.get("name") or "") if isinstance(data.get("name"), str) else None
+    if path is None:
+        return jsonify(error="File not found."), 404
+    ref = _pl_ref(path)
+    with _meta_lock:
+        plays = _plays()
+        entry = plays.get(ref, {})
+        entry = {"n": int(entry.get("n") or 0) + 1, "last": _now()}
+        plays[ref] = entry
+        _write_json(PLAYS_FILE, plays)
+    _db().execute("INSERT OR REPLACE INTO plays VALUES(?,?,?)", (ref, entry["n"], entry["last"]))
+    return jsonify(plays=entry["n"])

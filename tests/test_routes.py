@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from tubegrab import config, images, index, jobs, meta
-from conftest import LIB, add_file, reindex
+from conftest import LIB, add_file, patch, reindex
 
 
 def image(fmt: str = "png", size: str = "320x180") -> bytes:
@@ -448,3 +448,93 @@ def test_a_hearted_song_stays_hearted_when_moved(client):
     assert r.status_code == 200
     reindex()
     assert [f["name"] for f in client.get("/api/files?fav=1").get_json()["files"]] == [r.get_json()["name"]]
+
+
+# ---------------------------------------------------------------- plays
+
+def test_plays_count_up_and_sort(client):
+    a = add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    add_file("Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a", "p0000000002", title="Groundhog", artist="Primus")
+    reindex()
+    for _ in range(2):
+        assert client.post("/api/played", json={"name": "Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a"}).status_code == 200
+    assert client.post("/api/played", json={"name": "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a"}).get_json() == {"plays": 1}
+    files = client.get("/api/files?section=Music&sort=plays").get_json()["files"]
+    assert [(f["title"], f["plays"]) for f in files] == [("Groundhog", 2), ("To Defy", 1)]
+    assert files[0]["last_played"]
+    assert client.get("/api/files?sort=played").get_json()["files"][0]["title"] == "To Defy"   # most recent
+    assert json.loads(config.PLAYS_FILE.read_text())["p0000000002:audio"]["n"] == 2
+    assert a.exists()
+
+
+def test_plays_survive_an_index_rebuild(client):
+    from tubegrab import db
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    reindex()
+    client.post("/api/played", json={"name": "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a"})
+    db._db().execute("PRAGMA user_version=1")   # an old index: dropped and rebuilt from the files
+    db._db_init()
+    index._indexer.known = {}                     # (as after a restart)
+    reindex()
+    assert client.get("/api/files").get_json()["files"][0]["plays"] == 1
+
+
+@pytest.mark.parametrize("body", [{"name": "../../etc/passwd"}, {"name": "Music/missing.m4a"}, {"name": 5}, {}])
+def test_plays_refuse_what_isnt_there(client, body):
+    assert client.post("/api/played", json=body).status_code == 404
+    assert not config.PLAYS_FILE.exists()
+
+
+# ---------------------------------------------------------------- genres
+
+class FakeMusicBrainz:
+    """Answers searches and lookups for a few artists / release groups."""
+    def __init__(self, groups=None, artists=None):
+        self.groups, self.artists, self.asked = groups or {}, artists or {}, []
+
+    def __call__(self, url, mb=False):
+        import urllib.parse
+        self.asked.append(url)
+        u = urllib.parse.urlparse(url)
+        q = urllib.parse.parse_qs(u.query).get("query", [""])[0]
+        if u.path.endswith("/release-group/"):
+            hits = [{"id": f"rg:{k}", "score": 100} for k in self.groups if f'"{k}"' in q]
+            return {"release-groups": hits}
+        if u.path.endswith("/artist/"):
+            return {"artists": [{"id": f"a:{k}", "score": 100} for k in self.artists if f'"{k}"' in q]}
+        kind, _, name = u.path.rsplit("/", 1)[-1].partition(":")
+        table = self.groups if kind == "rg" else self.artists
+        return {"genres": [{"name": g, "count": 10 - i} for i, g in enumerate(table.get(name, []))] + [{"name": "unvoted", "count": 0}]}
+
+
+def test_genres_come_from_the_album_or_else_the_artist(client, monkeypatch):
+    from tubegrab import genres
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus", album="Frizzle Fry")
+    add_file("Music/Primus/Rare Thing (1999)/01 - X.m4a", "p0000000002", title="X", artist="Primus", album="Rare Thing")
+    add_file("Music/Primus/Singles/Y.m4a", "p0000000003", title="Y", artist="Primus")
+    reindex()
+    mb = FakeMusicBrainz(groups={"Frizzle Fry": ["funk metal", "alternative metal"]}, artists={"Primus": ["funk metal", "alternative rock"]})
+    patch(monkeypatch, "_http_json", mb)
+    genres.backfill_genres()
+    reindex()
+    got = {c["key"]: c["genres"] for c in client.get("/api/library").get_json()["collections"]}
+    assert got == {"Music/Primus/Frizzle Fry (1990)": ["funk metal", "alternative metal"],
+                   "Music/Primus/Rare Thing (1999)": ["funk metal", "alternative rock"],   # (the artist's)
+                   "Music/Primus/Singles": ["funk metal", "alternative rock"]}
+    assert sum("/artist/" in u for u in mb.asked) == 2   # the artist was looked up once (search + lookup)
+
+    n = len(mb.asked)
+    genres.backfill_genres()
+    assert len(mb.asked) == n   # each folder is asked about once
+
+
+def test_genres_wait_when_musicbrainz_is_unreachable(client, monkeypatch):
+    from tubegrab import genres
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    reindex()
+    genres.backfill_genres()   # (conftest: the network is off)
+    assert "genres" not in json.loads(config.FOLDERS_FILE.read_text() if config.FOLDERS_FILE.exists() else "{}").get(
+        "Music/Primus/Frizzle Fry (1990)", {})
+    patch(monkeypatch, "_http_json", FakeMusicBrainz())
+    genres.backfill_genres()
+    assert json.loads(config.FOLDERS_FILE.read_text())["Music/Primus/Frizzle Fry (1990)"]["genres"] == []   # asked: none

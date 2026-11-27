@@ -12,7 +12,7 @@ from ..config import DOWNLOAD_DIR
 from ..events import _BOOT, _bus, _bus_last, _bus_prog
 from ..meta import _index
 from ..files import _collection_info
-from ..db import _db, _file_out, _order_sql, _OUT_COLS, _rows_by_names, _search_key
+from ..db import _db, _file_out, _order_sql, _OUT_COLS, PLAYS_LAST, PLAYS_N, _rows_by_names, _search_key
 from ..httputil import _cached_json, _json_bytes
 from ..playlists import _pl_all, _pl_resolve
 from ..favorites import favorite_refs
@@ -61,7 +61,7 @@ def api_library():
 def api_files():
     """Library files, filtered / sorted / paged in the database.
     dir=<collection> · section=Music|videos · kind=audio|video · q=<words> · fav=1
-    sort=new|old|title|artist|size|long|auto · offset · limit · only=names"""
+    sort=new|old|title|artist|plays|played|size|long|auto · offset · limit · only=names"""
     a = request.args
     where, args = ["1=1"], []
     d = a.get("dir")
@@ -85,7 +85,8 @@ def api_files():
     sort = a.get("sort") or "auto"
     orders = {"new": "f.mtime DESC", "old": "f.mtime ASC", "title": "f.sort_title", "size": "f.size DESC",
               "long": "COALESCE(f.duration,0) DESC",
-              "artist": "f.artist IS NULL, f.artist COLLATE NOCASE, f.album COLLATE NOCASE, f.idx, f.sort_title"}
+              "artist": "f.artist IS NULL, f.artist COLLATE NOCASE, f.album COLLATE NOCASE, f.idx, f.sort_title",
+              "plays": f"COALESCE({PLAYS_N},0) DESC", "played": f"COALESCE({PLAYS_LAST},'') DESC"}
     order = orders.get(sort) or (_order_sql(_collection_info(d)["kind"]) if d else "f.mtime DESC")
     w = " AND ".join(where)
     con = _db()

@@ -12,7 +12,7 @@ import threading
 import unicodedata
 
 from .config import META_DIR
-from .meta import _progress
+from .meta import _plays, _progress
 
 
 
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS collections(key TEXT PRIMARY KEY, section TEXT NOT NU
 CREATE TABLE IF NOT EXISTS dirs(path TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS progress(ref TEXT PRIMARY KEY, pos REAL NOT NULL DEFAULT 0, watched INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS colors(tv TEXT PRIMARY KEY, color TEXT);
+CREATE TABLE IF NOT EXISTS plays(ref TEXT PRIMARY KEY, n INTEGER NOT NULL, last TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS caption_state(name TEXT PRIMARY KEY, stamp TEXT NOT NULL, lo INTEGER, hi INTEGER);
 CREATE VIRTUAL TABLE IF NOT EXISTS captions USING fts5(text, name UNINDEXED, start UNINDEXED, i UNINDEXED,
   tokenize='porter unicode61 remove_diacritics 2');
@@ -95,12 +96,13 @@ def _db_init() -> None:
         con.create_function("search_text", 5, _search_text, deterministic=True)
         con.execute("UPDATE files SET search=search_text(title, artist, album, uploader, dir)")
     elif version != DB_SCHEMA:
-        for t in ("files", "collections", "dirs", "progress", "colors", "caption_state", "captions"):
+        for t in ("files", "collections", "dirs", "progress", "plays", "colors", "caption_state", "captions"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
         con.execute("VACUUM")
     con.executescript(_SCHEMA)
     con.execute(f"PRAGMA user_version={DB_SCHEMA}")
     _progress_to_db(_progress())
+    _plays_to_db(_plays())
 
 
 def _progress_to_db(prog: dict) -> None:
@@ -112,10 +114,22 @@ def _progress_to_db(prog: dict) -> None:
                         [(r, float(p.get("pos") or 0), 1 if p.get("watched") else 0) for r, p in prog.items()])
 
 
+def _plays_to_db(plays: dict) -> None:
+    """plays.json is the record; the table mirrors it for sorting and output."""
+    con = _db()
+    with _tx(con):
+        con.execute("DELETE FROM plays")
+        con.executemany("INSERT INTO plays VALUES(?,?,?)",
+                        [(r, int(p.get("n") or 0), p.get("last") or "") for r, p in plays.items()])
+
+
 # -- reading the index
 
+PLAYS_N = "(SELECT n FROM plays p WHERE p.ref=f.ref)"
+PLAYS_LAST = "(SELECT last FROM plays p WHERE p.ref=f.ref)"
 _OUT_COLS = ("f.name, f.dir, f.section, f.kind, f.title, f.size, f.mtime, f.duration, f.height, f.vid, f.artist, "
-             "f.album, f.uploader, f.upload_date, f.year, f.url, f.idx, f.art, f.tv, f.subs, f.lyrics, k.color")
+             "f.album, f.uploader, f.upload_date, f.year, f.url, f.idx, f.art, f.tv, f.subs, f.lyrics, k.color, "
+             f"{PLAYS_N} AS plays, {PLAYS_LAST} AS last_played")
 
 
 def _file_out(r: sqlite3.Row, chapters: str | None = None) -> dict:
@@ -125,6 +139,7 @@ def _file_out(r: sqlite3.Row, chapters: str | None = None) -> dict:
         "id": r["vid"], "artist": r["artist"], "album": r["album"], "uploader": r["uploader"],
         "upload_date": r["upload_date"], "year": r["year"], "url": r["url"], "index": r["idx"],
         "art": r["art"], "tv": r["tv"], "color": r["color"], "subs": bool(r["subs"]), "lyrics": r["lyrics"],
+        "plays": r["plays"] or 0, "last_played": r["last_played"],
     }
     if chapters is not None:
         out["chapters"] = json.loads(chapters) if chapters else None

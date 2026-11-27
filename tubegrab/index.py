@@ -361,7 +361,7 @@ def _collection_data(con: sqlite3.Connection, key: str, folders: dict) -> dict |
         rows.sort(key=lambda f: -f["mtime"])
     c.update(url=extra.get("url"), count=len(rows), size=sum(f["size"] for f in rows),
              duration=sum(f["duration"] or 0 for f in rows), updated=max(f["mtime"] for f in rows),
-             first=rows[0]["name"], art=None, cover_url=None)
+             first=rows[0]["name"], art=None, cover_url=None, genres=extra.get("genres") or [])
     shown = rows
     custom = _folder_cover(key, folders)
     if custom:

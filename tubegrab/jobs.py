@@ -27,6 +27,7 @@ from .naming import _plan
 from .images import _crop_square, _embed_cover, warm_thumbs
 from .lyrics import _fetch_lyrics_bg
 from .albums import _album_cover, _album_for
+from .genres import backfill_genres
 from .playlists import _pl_all, _pl_refs
 from .index import _find_existing
 
@@ -391,6 +392,7 @@ def _tidy_when_idle() -> None:
         try:
             tidy_music()
             warm_thumbs()
+            backfill_genres()   # (new albums)
         except Exception as exc:  # noqa: BLE001 — never fail a job over housekeeping
             print(f"[tubegrab] tidy failed: {exc}")
 

@@ -93,6 +93,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // ---- progress: save where you are (every 10 s, on pause / switch / leave)
   const lastSave = useRef(0);
   const marked = useRef<string | null>(null);   // finished (watched) this session
+  const counted = useRef<string | null>(null);  // this listen already counted as a play
   const saveProgress = useCallback((beacon = false) => {
     const f = live.current.file;
     if (!f || !resumable(f) || !el.currentTime || marked.current === f.name) return;
@@ -211,7 +212,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const onTime = () => {
       const f = live.current.file;
-      if (!f || !resumable(f)) return;
+      if (!f) return;
+      // a play: half of it or 4 minutes, whichever comes first (once per listen; again after a restart)
+      if (counted.current === f.name && el.currentTime < 5) counted.current = null;
+      else if (counted.current !== f.name && el.duration >= 30 && el.currentTime >= Math.min(el.duration / 2, 240)) {
+        counted.current = f.name;
+        api.played(f.name).catch(() => {});
+      }
+      if (!resumable(f)) return;
       if (el.duration && el.currentTime / el.duration >= 0.92 && marked.current !== f.name && !live.current.progress[f.name]?.watched) {
         marked.current = f.name;
         setWatched(f, true).catch(() => {});

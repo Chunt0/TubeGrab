@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import (
     AUDIO_EXTS, COVERS_DIR, DOWNLOAD_DIR, FOLDERS_FILE, ID_RE, INDEX_FILE, MEDIA_EXTS, META_DIR, _meta_lock,
-    _now, PLAYLISTS_FILE, PROGRESS_FILE, THUMB_EXTS,
+    _now, PLAYLISTS_FILE, PLAYS_FILE, PROGRESS_FILE, THUMB_EXTS,
 )
 from .events import _lib_bump
 
@@ -273,3 +273,8 @@ def _forget_gone_folders() -> None:
 
 def _progress() -> dict:
     return _read_json(PROGRESS_FILE, {})
+
+
+def _plays() -> dict:
+    """{ref: {"n": times played, "last": when}} (a play: half the item, or 4 minutes)."""
+    return _read_json(PLAYS_FILE, {})
