@@ -146,6 +146,7 @@ def _now() -> str:
 def _clean(name: str | None, fallback: str = "Unknown", limit: int = 120) -> str:
     """A file/folder name that's safe on Linux, Windows and SMB shares."""
     s = (name or "").replace(":", " -").replace("/", "-").replace("\\", "-")
+    s = re.sub(r"\s", " ", s)               # (tabs, line breaks: a space, not nothing)
     s = re.sub(r'[<>"|?*\x00-\x1f]', "", s)
     s = re.sub(r"\s+", " ", s).strip().rstrip(". ")
     s = s.lstrip(".")                       # no hidden files
@@ -3626,9 +3627,11 @@ def spa(path: str = ""):
 
 
 # ---------------------------------------------------------------- background threads
-threading.Thread(target=_indexer.run, daemon=True, name="indexer").start()
-threading.Thread(target=_jobs_publisher, daemon=True, name="jobs-events").start()
-threading.Thread(target=_startup, daemon=True, name="migrate").start()
+# (the tests import the app without them: TUBEGRAB_NO_THREADS=1)
+if os.environ.get("TUBEGRAB_NO_THREADS") != "1":
+    threading.Thread(target=_indexer.run, daemon=True, name="indexer").start()
+    threading.Thread(target=_jobs_publisher, daemon=True, name="jobs-events").start()
+    threading.Thread(target=_startup, daemon=True, name="migrate").start()
 
 
 if __name__ == "__main__":

@@ -166,7 +166,21 @@ rights to download. This tool is for personal archival of your own content.
 | `static/placeholder.svg` | Fallback thumbnail |
 | `downloads/` | Library (`TUBEGRAB_DOWNLOADS`); `.meta/` holds metadata, thumbnails, caches |
 | `run.sh` | venv bootstrap + launch (local) |
+| `tests/` | pytest suite: filing, album recognition, moves, path safety, parsers (no network) |
 | `Dockerfile`, `docker/entrypoint.sh`, `docker-compose.yml` | container build + NAS deployment |
+
+## Tests
+
+```sh
+.venv/bin/pip install -r requirements-dev.txt   # once
+.venv/bin/python -m pytest
+```
+
+Each test gets an empty throwaway library; MusicBrainz, LRCLIB and the
+background threads are off. A push deploys, so `git push` runs them (and the
+UI type check) first and stops if anything fails; `git push --no-verify` skips
+that. The hook lives in `.githooks/`; a fresh clone enables it with
+`git config core.hooksPath .githooks`.
 
 ## Deploying updates (git push → NAS)
 

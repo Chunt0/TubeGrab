@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# A push deploys to the NAS: run the tests and the UI type check first.
+# Skip in an emergency with `git push --no-verify`.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import pytest" 2>/dev/null; then
+    echo "pre-push: no test setup. Run: ./run.sh once, then .venv/bin/pip install -r requirements-dev.txt" >&2
+    exit 1
+fi
+
+echo "pre-push: running tests…"
+if ! .venv/bin/python -m pytest; then
+    echo "pre-push: tests failed, not pushing." >&2
+    exit 1
+fi
+
+if command -v bun >/dev/null && [ -d web/node_modules ]; then
+    echo "pre-push: type-checking the UI…"
+    if ! (cd web && bun run --silent typecheck); then
+        echo "pre-push: UI type check failed, not pushing." >&2
+        exit 1
+    fi
+fi
