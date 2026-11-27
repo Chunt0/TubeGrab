@@ -81,9 +81,16 @@ Image → Import (the NAS must have the same CPU architecture).
   downloads run at a time, the rest queue (`TUBEGRAB_PARALLEL`)
 - Live progress: percent, speed, ETA, current file; a **Stop** button cancels
   a running download
-- **Quick grab** from anywhere: `⌘K` / `/` opens it, or just paste a link on any page
-- **Music** (`/music`): albums (square covers), artists, album pages with
-  track lists; **Videos** (`/videos`): channels, playlists, recent videos.
+- **Search or grab** from anywhere: `⌘K` / `/` opens one box that finds
+  artists, albums, songs, channels, playlists and videos (accents, case and
+  punctuation don't matter: "bjork", "acdc"); a pasted link turns it into the
+  download form. Pasting a link on any page opens it with the link in.
+- **Music** (`/music`): Albums, Artists and Songs tabs (the last one used is
+  remembered), sorted by name with A–Z headings and a jump rail (drag it on a
+  phone), or by year with decades; back returns to the same spot. **Favorites**:
+  heart artists, albums and songs (artist and album pages, track rows, the
+  player); the Favorites switch shows just those in each tab. Album pages
+  with track lists; **Videos** (`/videos`): channels, playlists, recent videos.
   Play all / Shuffle everywhere; Up next follows album/playlist order
 - **Library** (`/`) like a personal YouTube: thumbnail grid
   (poster frames generated with ffmpeg and cached in `.meta/thumbs/`), search,
@@ -152,6 +159,38 @@ content (usually only matters for age-restricted or member videos), export
 your browser cookies in Netscape format to `cookies.txt` in this folder and
 restart — it is picked up automatically.
 
+## Command line
+
+`bin/grab` queues downloads from a terminal (Python 3 standard library only, so
+it can be copied anywhere). Give it files with one link per line, links, or
+both; blank lines and `#` lines are skipped. The server downloads two at a time
+and queues the rest.
+
+```sh
+bin/grab links.txt              # audio (the default)
+bin/grab -v links.txt more.txt  # video
+bin/grab -p <playlist link>     # whole playlists, as an album or playlist
+pbpaste | bin/grab -v -w        # links from stdin; wait and report each one
+```
+
+For long lists, `--slow` keeps YouTube from rate-limiting the batch partway
+through. YouTube allows about 300 videos an hour per connection. grab then
+sends one link at a time and pauses between them (60 s, `--pause` to change);
+it has to keep running:
+
+```sh
+nohup bin/grab -p --slow albums.txt > grab.log 2>&1 &
+tail -f grab.log
+```
+
+If YouTube limits it anyway, it waits an hour and tries that link again, even
+an album that was cut short. If the server is down (a deploy, a reboot), it
+waits until the server is back. Finished links go into `albums.txt.done`, so
+running the same command again carries on where it left off.
+
+It talks to `$TUBEGRAB_URL`, else `http://192.168.254.10:8765`; `-s` overrides
+both. `ln -s "$PWD/bin/grab" ~/.local/bin/grab` puts it on your PATH.
+
 ## Legal note
 
 Only download videos you uploaded yourself or that you otherwise have the
@@ -167,6 +206,7 @@ rights to download. This tool is for personal archival of your own content.
 | `static/placeholder.svg` | Fallback thumbnail |
 | `downloads/` | Library (`TUBEGRAB_DOWNLOADS`); `.meta/` holds metadata, thumbnails, caches |
 | `run.sh` | venv bootstrap + launch (local) |
+| `bin/grab` | Command-line client: queue links from files or stdin |
 | `tests/` | pytest suite: filing, album recognition, moves, path safety, parsers (no network) |
 | `Dockerfile`, `docker/entrypoint.sh`, `docker-compose.yml` | container build + NAS deployment |
 

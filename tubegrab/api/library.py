@@ -12,9 +12,10 @@ from ..config import DOWNLOAD_DIR
 from ..events import _BOOT, _bus, _bus_last, _bus_prog
 from ..meta import _index
 from ..files import _collection_info
-from ..db import _db, _file_out, _order_sql, _OUT_COLS, _rows_by_names
+from ..db import _db, _file_out, _order_sql, _OUT_COLS, _rows_by_names, _search_key
 from ..httputil import _cached_json, _json_bytes
 from ..playlists import _pl_all, _pl_resolve
+from ..favorites import favorite_refs
 from ..index import _indexer
 from ..jobs import _jobs_payload
 from .. import events
@@ -59,8 +60,8 @@ def api_library():
 @bp.get("/api/files")
 def api_files():
     """Library files, filtered / sorted / paged in the database.
-    dir=<collection> · section=Music|videos · kind=audio|video · q=<words>
-    sort=new|old|title|size|long|auto · offset · limit · only=names"""
+    dir=<collection> · section=Music|videos · kind=audio|video · q=<words> · fav=1
+    sort=new|old|title|artist|size|long|auto · offset · limit · only=names"""
     a = request.args
     where, args = ["1=1"], []
     d = a.get("dir")
@@ -74,12 +75,17 @@ def api_files():
     if a.get("kind") in ("audio", "video"):
         where.append("f.kind=?")
         args.append(a["kind"])
-    for tok in (a.get("q") or "").casefold().split()[:8]:
+    if a.get("fav"):   # hearted songs only
+        refs = favorite_refs()
+        where.append(f"f.ref IN ({','.join('?' * len(refs))})" if refs else "0")
+        args.extend(refs)
+    for tok in _search_key(a.get("q") or "").split()[:8]:
         where.append("f.search LIKE ? ESCAPE '\\'")
         args.append("%" + tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
     sort = a.get("sort") or "auto"
     orders = {"new": "f.mtime DESC", "old": "f.mtime ASC", "title": "f.sort_title", "size": "f.size DESC",
-              "long": "COALESCE(f.duration,0) DESC"}
+              "long": "COALESCE(f.duration,0) DESC",
+              "artist": "f.artist IS NULL, f.artist COLLATE NOCASE, f.album COLLATE NOCASE, f.idx, f.sort_title"}
     order = orders.get(sort) or (_order_sql(_collection_info(d)["kind"]) if d else "f.mtime DESC")
     w = " AND ".join(where)
     con = _db()

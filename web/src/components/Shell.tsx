@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Film, ListMusic, Loader2, Music2, Plus } from "lucide-react";
+import { Film, ListMusic, Loader2, Music2, Search } from "lucide-react";
 import { Link, useRouter } from "../router";
 import { useStore } from "../store";
 import { cx } from "../lib/format";
@@ -62,14 +62,16 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="flex-1" />
           <button
             onClick={() => openGrab()}
-            className="flex h-7 items-center gap-2 rounded-sm border border-line-strong px-2.5 text-[13px] text-fg transition-colors hover:bg-white/5"
+            className="flex h-8 w-72 items-center gap-2 rounded-sm border border-line-strong px-2.5 text-[13px] text-faint transition-colors hover:border-fg/40 hover:text-muted"
           >
+            <Search className="size-3.5 shrink-0" />
+            <span className="flex-1 truncate text-left">Search or paste a link</span>
             {activeCount > 0 && (
               <span className="flex items-center gap-1 font-mono text-[11px] text-muted tabular" title={`${activeCount} downloading`}>
                 <Loader2 className="size-3 animate-spin" />{activeCount}
               </span>
             )}
-            Add <Kbd>⌘K</Kbd>
+            <Kbd>⌘K</Kbd>
           </button>
         </div>
       </header>
@@ -84,8 +86,8 @@ export function Shell({ children }: { children: ReactNode }) {
         <TabLink to="/videos" icon={Film} label="Videos" />
         <TabLink to="/playlists" icon={ListMusic} label="Playlists" />
         <button onClick={() => openGrab()} className="relative flex flex-1 flex-col items-center justify-center gap-1 text-[10.5px] text-faint active:text-fg">
-          {activeCount > 0 ? <Loader2 className="size-5 animate-spin" strokeWidth={1.6} /> : <Plus className="size-5" strokeWidth={1.6} />}
-          Add
+          {activeCount > 0 ? <Loader2 className="size-5 animate-spin" strokeWidth={1.6} /> : <Search className="size-5" strokeWidth={1.6} />}
+          Search
           {activeCount > 0 && (
             <span className="absolute left-1/2 top-1.5 ml-2 min-w-4 rounded-sm bg-fg px-1 text-center font-mono text-[9.5px] leading-4 text-ink tabular">{activeCount}</span>
           )}

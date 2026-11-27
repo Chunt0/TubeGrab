@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { useRouter } from "./router";
 import { Shell } from "./components/Shell";
-import { GrabDialog } from "./components/GrabDialog";
+import { SearchDialog } from "./components/Search";
 import { Toasts } from "./components/Toasts";
-import { Music } from "./pages/Music";
+import { Music, type View } from "./pages/Music";
 import { ArtistPage } from "./pages/Artist";
 import { Videos } from "./pages/Videos";
 import { Watch } from "./pages/Watch";
@@ -28,6 +28,7 @@ export function App() {
   if ((r = m(/^\/watch\/(.+)$/))) page = <Watch name={decodeURIComponent(r[1])} />;
   else if ((r = m(/^\/c\/(.+)$/))) page = <CollectionPage key={r[1]} name={decodeURIComponent(r[1])} />;
   else if ((r = m(/^\/music\/artist\/(.+)$/))) page = <ArtistPage name={decodeURIComponent(r[1])} />;
+  else if ((r = m(/^\/music\/(albums|artists|songs)\/?$/))) page = <Music view={r[1] as View} />;
   else if (path.startsWith("/music")) page = <Music />;
   else if (path.startsWith("/videos")) page = <Videos />;
   else if (path.startsWith("/downloads")) page = <Downloads />;
@@ -38,7 +39,7 @@ export function App() {
   return (
     <>
       <Shell>{page}</Shell>
-      <GrabDialog />
+      <SearchDialog />
       <AddToPlaylist />
       <Toasts />
     </>

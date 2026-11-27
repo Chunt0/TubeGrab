@@ -16,6 +16,7 @@ INDEX_FILE = META_DIR / "index.json"       # "<video id>:<kind>" → library pat
 FOLDERS_FILE = META_DIR / "folders.json"   # collection path → {title, url}
 THUMBS_DIR = META_DIR / "thumbs"           # ffmpeg poster-frame cache (fallback)
 PLAYLISTS_FILE = META_DIR / "playlists.json"   # the user's own playlists (references, not copies)
+FAVORITES_FILE = META_DIR / "favorites.json"   # hearted artists (names) and songs (references); albums: in folders.json
 PROGRESS_FILE = META_DIR / "progress.json"     # resume positions + watched flags
 PL_COVERS_DIR = META_DIR / "playlists"         # uploaded playlist pictures
 COVERS_DIR = META_DIR / "covers"               # uploaded album / collection pictures

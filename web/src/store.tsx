@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, isActive, urls, type Collection, type Format, type Job, type Library, type LibraryFile, type Playlist, type PlaylistPatch } from "./api";
+import { api, isActive, songRef, urls, type Collection, type Favorites, type FavoriteKind, type Format, type Job, type Library, type LibraryFile, type Playlist, type PlaylistPatch } from "./api";
 import { fetchQuery, revalidateAll, setQueryData, setVersion, useQuery } from "./lib/cache";
 
 export interface Progress { pos: number; watched: boolean }
@@ -39,6 +39,9 @@ interface Store {
   toasts: Toast[];
   toast: (t: Omit<Toast, "id">) => void;
   dismiss: (id: number) => void;
+  favorites: Favorites;
+  /** heart / un-heart: an artist name, an album key, or a song (library name; `ref` = its songRef) */
+  setFavorite: (kind: FavoriteKind, id: string, on: boolean, ref?: string) => void;
   grabOpen: boolean;
   grabPrefill: string;
   openGrab: (prefill?: string) => void;
@@ -46,10 +49,12 @@ interface Store {
 }
 
 const Ctx = createContext<Store | null>(null);
+const NO_FAVORITES: Favorites = { artists: [], albums: [], songs: [] };
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const lib = useQuery<Library>(urls.library);
   const pls = useQuery<{ playlists: Playlist[] }>(urls.playlists);
+  const favs = useQuery<Favorites>(urls.favorites);
   const [progress, setProgress] = useState<Record<string, Progress>>({});
   const [addTarget, setAddTarget] = useState<Store["addTarget"]>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -224,6 +229,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setAddTarget({ names, label: label ?? `${names.length} ${names.length === 1 ? "item" : "items"}` }), []);
   const closeAddToPlaylist = useCallback(() => setAddTarget(null), []);
 
+  const setFavorite = useCallback((kind: FavoriteKind, id: string, on: boolean, ref?: string) => {
+    const list = kind === "artist" ? "artists" : kind === "album" ? "albums" : "songs";
+    const item = kind === "song" ? ref ?? id : id;
+    let before: Favorites | undefined;
+    setQueryData<Favorites>(urls.favorites, (old) => {   // straight away; the server's answer follows
+      before = old;
+      const cur = old ?? NO_FAVORITES;
+      const rest = cur[list].filter((x) => x !== item);
+      return { ...cur, [list]: on ? [item, ...rest] : rest };
+    });
+    api.setFavorite(kind, id, on)
+      .then((f) => setQueryData<Favorites>(urls.favorites, () => f))
+      .catch((e) => {
+        setQueryData<Favorites>(urls.favorites, () => before);
+        toast({ kind: "bad", title: "Couldn't save", body: e instanceof Error ? e.message : String(e) });
+      });
+  }, [toast]);
+
   const openGrab = useCallback((prefill = "") => { setGrabPrefill(prefill); setGrabOpen(true); }, []);
   const closeGrab = useCallback(() => setGrabOpen(false), []);
 
@@ -235,6 +258,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       playlists: pls.data?.playlists ?? [], playlistsLoaded: !!pls.data,
       createPlaylist, updatePlaylist, deletePlaylist, uploadPlaylistCover, addTarget, openAddToPlaylist, closeAddToPlaylist,
       toasts, toast, dismiss, grabOpen, grabPrefill, openGrab, closeGrab,
+      favorites: favs.data ?? NO_FAVORITES, setFavorite,
     }}>
       {children}
     </Ctx.Provider>
@@ -251,4 +275,14 @@ export function useStore() {
 export function useWatchedCount(key: string): number | null {
   const { library } = useStore();
   return library?.watched[key] || null;
+}
+
+/** Whether this artist / album / song is hearted, and a toggle. */
+export function useFavorite(kind: FavoriteKind, id: string, file?: LibraryFile): [boolean, () => void] {
+  const { favorites, setFavorite } = useStore();
+  const ref = file ? songRef(file) : undefined;
+  const on = kind === "artist" ? favorites.artists.includes(id)
+    : kind === "album" ? favorites.albums.includes(id)
+    : favorites.songs.includes(ref ?? id);
+  return [on, () => setFavorite(kind, id, !on, ref)];
 }

@@ -15,6 +15,7 @@ list; the two exceptions are deferred imports, marked where they are made):
     lyrics        LRCLIB lookups
     albums        recognising fan-upload playlists as albums (MusicBrainz)
     playlists     your playlists
+    favorites     hearted artists, albums and songs
     index         the background indexer
     jobs          downloads (yt-dlp)
     moves         Music ⇄ Videos

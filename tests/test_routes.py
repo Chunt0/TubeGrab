@@ -335,3 +335,116 @@ def test_search_finds_words_spoken_in_videos(client):
     assert "today we talk about the bass clef" in res[0]["hits"][0]["text"]
     assert client.get("/api/search?q=ba").get_json() == {"results": []}
     assert client.get('/api/search?q=" OR *').get_json() == {"results": []}
+
+
+def test_a_job_keeps_the_error_of_a_track_that_failed(monkeypatch):
+    """ignoreerrors lets an album finish without the tracks YouTube refused;
+    the job must still say why, or bin/grab --slow can't tell it was cut short."""
+
+    class FakeDL:
+        def __init__(self, opts, **kw):
+            self.plans, self.last_error = {}, None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def extract_info(self, url, download):
+            self.last_error = "[youtube] xyz: This content isn't available, try again later."
+            return {"_type": "playlist", "title": "Album", "entries": [{"id": "a"}, None]}
+
+    monkeypatch.setattr(jobs, "_GrabDL", FakeDL)
+    config._jobs["j1"] = {"id": "j1", "url": "https://x", "cancel": False, "files": []}
+    jobs._run_job_slot("j1", "https://x", "video", True)
+    job = config._jobs["j1"]
+    assert job["status"] == "complete" and job["entry_count"] == 1
+    assert "try again later" in job["error"]
+
+
+def test_file_search_ignores_accents_case_and_punctuation(client):
+    add_file("Music/Björk/Post (1995)/01 - Army of Me.m4a", "bjork000001", title="Army of Me", artist="Björk")
+    add_file("Music/AC-DC/Back in Black (1980)/01 - Hells Bells.m4a", "acdc0000001", title="Hells Bells", artist="AC/DC")
+    reindex()
+    found = lambda q: [f["title"] for f in client.get(f"/api/files?q={q}").get_json()["files"]]
+    assert found("bjork army") == ["Army of Me"]
+    assert found("BJÖRK") == ["Army of Me"]
+    assert found("acdc") == found("ac dc") == found("AC/DC bells") == ["Hells Bells"]
+
+
+def test_songs_sort_by_artist_then_album_order(client):
+    add_file("Music/Primus/Sailing (1991)/02 - B.m4a", "p0000000002", title="Zzz", artist="Primus", album="Sailing")
+    add_file("Music/Primus/Sailing (1991)/01 - A.m4a", "p0000000001", title="Yyy", artist="Primus", album="Sailing")
+    add_file("Music/Melvins/Houdini (1993)/01 - C.m4a", "m0000000001", title="Xxx", artist="Melvins", album="Houdini")
+    reindex()
+    names = [f["title"] for f in client.get("/api/files?section=Music&sort=artist").get_json()["files"]]
+    assert names == ["Xxx", "Yyy", "Zzz"]
+
+
+def test_an_old_index_gets_accent_free_search_without_a_rebuild(lib):
+    from tubegrab import db
+    add_file("Music/Björk/Post (1995)/01 - Army of Me.m4a", "bjork000001", title="Army of Me", artist="Björk")
+    reindex()
+    con = db._db()
+    con.execute("UPDATE files SET search='army of me björk'")
+    con.execute("PRAGMA user_version=2")
+    db._db_init()
+    assert con.execute("SELECT search FROM files").fetchone()[0].startswith("army of me bjork")
+    assert con.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 1   # kept, not dropped
+
+
+# ---------------------------------------------------------------- favorites
+
+def fav(client, kind, ident, on=True):
+    return client.post("/api/favorites", json={"kind": kind, "id": ident, "on": on})
+
+
+def test_favorites_heart_and_unheart_artists_albums_and_songs(client):
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    add_file("Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a", "p0000000002", title="Groundhog", artist="Primus")
+    reindex()
+    assert fav(client, "artist", "Primus").status_code == 200
+    assert fav(client, "album", "Music/Primus/Frizzle Fry (1990)").status_code == 200
+    r = fav(client, "song", "Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a").get_json()
+    assert r == {"artists": ["Primus"], "albums": ["Music/Primus/Frizzle Fry (1990)"], "songs": ["p0000000002:audio"]}
+    assert client.get("/api/favorites").get_json() == r
+    reindex()
+    songs = client.get("/api/files?section=Music&fav=1").get_json()
+    assert [f["title"] for f in songs["files"]] == ["Groundhog"] and songs["total"] == 1
+
+    fav(client, "album", "Music/Primus/Frizzle Fry (1990)", on=False)
+    r = fav(client, "artist", "Primus", on=False).get_json()
+    assert r["artists"] == [] and r["albums"] == []
+    assert json.loads((config.FOLDERS_FILE).read_text() or "{}") == {}   # no empty record left behind
+    fav(client, "song", "Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a", on=False)
+    reindex()
+    assert client.get("/api/files?fav=1").get_json()["total"] == 0
+
+
+@pytest.mark.parametrize("kind, ident", [
+    ("album", "../outside"), ("album", "Videos/Uni"), ("album", "Music/Nobody"), ("song", "../../etc/passwd"),
+    ("song", "Music/missing.m4a"), ("planet", "x"), ("artist", ""), ("artist", 5), ("artist", "x" * 600),
+])
+def test_favorites_refuse_what_isnt_there(client, kind, ident):
+    (LIB / "Videos/Uni").mkdir(parents=True)
+    assert fav(client, kind, ident).status_code == 400
+
+
+def test_a_hearted_album_stays_hearted_when_renamed(client):
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    reindex()
+    fav(client, "album", "Music/Primus/Frizzle Fry (1990)")
+    r = client.post("/api/collections/edit", json={"key": "Music/Primus/Frizzle Fry (1990)", "title": "Frizzle Fry Deluxe"})
+    assert r.status_code == 200, r.get_json()
+    assert client.get("/api/favorites").get_json()["albums"] == [r.get_json()["key"]]
+
+
+def test_a_hearted_song_stays_hearted_when_moved(client):
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    reindex()
+    fav(client, "song", "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a")
+    r = client.post("/api/move", json={"name": "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "to": "Videos"})
+    assert r.status_code == 200
+    reindex()
+    assert [f["name"] for f in client.get("/api/files?fav=1").get_json()["files"]] == [r.get_json()["name"]]

@@ -5,7 +5,7 @@ import threading
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from .api import collections, downloads, library, media, playlists, progress
+from .api import collections, downloads, favorites, library, media, playlists, progress
 from .config import WEB_DIST
 from .index import _indexer
 from .jobs import _jobs_publisher
@@ -14,7 +14,7 @@ from .maintenance import _startup
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024   # playlist picture uploads
-for _bp in (library, downloads, collections, playlists, media, progress):
+for _bp in (library, downloads, collections, playlists, favorites, media, progress):
     app.register_blueprint(_bp.bp)
 
 _GZIP_TYPES = ("application/json", "text/html", "text/css", "text/javascript", "application/javascript", "image/svg+xml")

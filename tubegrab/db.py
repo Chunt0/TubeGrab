@@ -6,8 +6,10 @@ exactly the rows they affect. It is only an index — delete it and it is
 rebuilt from the files."""
 
 import json
+import re
 import sqlite3
 import threading
+import unicodedata
 
 from .config import META_DIR
 from .meta import _progress
@@ -15,7 +17,7 @@ from .meta import _progress
 
 
 DB_FILE = META_DIR / "library.db"
-DB_SCHEMA = 2
+DB_SCHEMA = 3   # 3: search text without accents (_search_text)
 _dbl = threading.local()
 
 _SCHEMA = """
@@ -71,9 +73,28 @@ class _tx:
         return False
 
 
+def _search_key(s: str) -> str:
+    """How searches compare words: case and accents don't count ('bjork' finds 'Björk')."""
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in s if not unicodedata.combining(c)).casefold()
+
+
+def _search_text(title, artist, album, uploader, key) -> str:
+    """A file's search column. The artist also goes in without punctuation, so
+    'acdc' finds AC/DC (and 'ac dc' finds it as two words)."""
+    words = [x for x in (title, artist, album, uploader, key) if x]
+    if artist and re.sub(r"\W", "", artist) != artist.replace(" ", ""):
+        words.append(re.sub(r"\W", "", artist))
+    return _search_key(" ".join(words))
+
+
 def _db_init() -> None:
     con = _db()
-    if con.execute("PRAGMA user_version").fetchone()[0] != DB_SCHEMA:
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    if version == 2:   # only the search text changed: redo it in place, not a whole reindex
+        con.create_function("search_text", 5, _search_text, deterministic=True)
+        con.execute("UPDATE files SET search=search_text(title, artist, album, uploader, dir)")
+    elif version != DB_SCHEMA:
         for t in ("files", "collections", "dirs", "progress", "colors", "caption_state", "captions"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
         con.execute("VACUUM")

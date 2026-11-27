@@ -17,7 +17,7 @@ from .events import _lib_bump
 from .meta import _folder_cover, _index, _iter_media, _kind, _meta_for, _meta_thumb, _read_json, _TEMP_STEM
 from .naming import _clean_channel
 from .files import _clean_chapters, _collection_info, _display_title, _probe
-from .db import _db, _db_init, _FILE_COLS, _INSERT_FILE, _tx
+from .db import _db, _db_init, _FILE_COLS, _INSERT_FILE, _search_text, _tx
 from .transcripts import _parse_vtt, _sub_file
 
 
@@ -331,7 +331,7 @@ def _build_row(full: str, rel: str, st: os.stat_result, by_path: dict, folders: 
     return {
         "name": rel, "dir": key, "section": c["section"], "kind": kind,
         "title": title, "sort_title": title.casefold(),
-        "search": " ".join(x for x in (title, artist, album, uploader, key) if x).casefold(),
+        "search": _search_text(title, artist, album, uploader, key),
         "size": st.st_size, "mtime": st.st_mtime, "duration": duration,
         "height": height if kind == "video" else None,
         "vid": vid, "ref": f"{vid}:{kind}" if vid else f"path:{rel}",

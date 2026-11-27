@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Heart } from "../components/Heart";
 import { ArrowLeft, CheckCheck, Download, Film, ListPlus, Mic2, Music, RotateCcw, Trash2 } from "lucide-react";
 import { useStore } from "../store";
 import { Link, artistPath, collectionPath, playlistPath, useRouter, watchPath } from "../router";
@@ -198,6 +199,7 @@ export function Watch({ name }: { name: string }) {
                 )}
               </p>
             </div>
+            {music && <Heart kind="song" id={file.name} file={file} className="-mt-1" />}
             <Menu className="-mr-2 -mt-1">
               {(close) => (
                 <>
