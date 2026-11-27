@@ -204,8 +204,15 @@ export function Music({ view: asked }: { view?: View }) {
   const { navigate, search } = useRouter();
   const [q, setQ] = useParam("q");
   const [sortParam, setSort] = useParam("sort");
-  const [favParam, setFav] = useParam("fav");
-  const fav = favParam === "1";
+  // the Favorites switch: in the URL (back / forward), else as you last left it
+  const [favParam, setFavParam] = useParam("fav");
+  const [favSaved, setFavSaved] = useState(() => remember.get("fav") === "1");
+  const fav = favParam ? favParam === "1" : favSaved;
+  const toggleFav = () => {
+    remember.set("fav", fav ? "0" : "1");
+    setFavSaved(!fav);
+    setFavParam(fav ? null : "1");
+  };
   const stored = remember.get("view") as View | null;
   const view: View = asked ?? (VIEWS.some((v) => v.id === stored) ? stored! : "albums");
 
@@ -255,7 +262,7 @@ export function Music({ view: asked }: { view?: View }) {
             <Tab key={v.id} role="tab" aria-selected={view === v.id} active={view === v.id} onClick={() => go(v.id)}>{v.label}</Tab>
           ))}
         </div>
-        <button type="button" onClick={() => setFav(fav ? null : "1")} aria-pressed={fav}
+        <button type="button" onClick={toggleFav} aria-pressed={fav}
           aria-label="Favorites" title="Favorites"
           className={cx("ml-auto flex h-8 items-center gap-1.5 text-[13px] transition-colors", fav ? "text-fg" : "text-muted hover:text-fg")}>
           <HeartIcon className="size-3.5" fill={fav ? "currentColor" : "none"} /> Favorites
