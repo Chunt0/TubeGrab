@@ -39,7 +39,7 @@ def _lrclib(path: str, params: dict):
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code == 404:
+            if e.code in (400, 404):   # no such song / a query it won't answer (a 63-minute mix)
                 return None
             if e.code == 429 and attempt < 3:   # slow down as asked
                 time.sleep(float(e.headers.get("Retry-After") or 30))

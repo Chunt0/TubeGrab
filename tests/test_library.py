@@ -4,8 +4,10 @@ import os
 
 import pytest
 
-from tubegrab import files, lyrics, meta, transcripts
+from tubegrab import config, files, lyrics, meta, transcripts
 from conftest import add_file
+
+REAL_LRCLIB = lyrics._lrclib   # (conftest swaps it for an offline fake)
 
 
 # ---------------------------------------------------------------- path safety
@@ -144,3 +146,29 @@ def test_parse_lrc():
         {"start": 8.25, "end": 60.0, "text": "Last"},
         {"start": 60.0, "end": 66.0, "text": "Chorus"},
     ]
+
+
+def test_lyrics_lookup_it_wont_answer_is_no_lyrics_not_offline(lib, monkeypatch):
+    """LRCLIB answers 400 to some queries (a 63-minute mix): that song has no
+    lyrics; the backfill must go on to the next one instead of stopping."""
+    import io
+    import urllib.error
+    import urllib.request
+    monkeypatch.setattr(lyrics, "_lrclib", REAL_LRCLIB)
+    monkeypatch.setattr(lyrics, "_lrclib_last", 0.0)
+    asked = []
+
+    def urlopen(req, timeout=None):
+        asked.append(req.full_url)
+        if "/get?" in req.full_url:
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b""))
+        return io.BytesIO(b"[]")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda s: None)   # (the 1.5 s between requests)
+    add_file("Music/Techno Llama/Singles/Mix.m4a", "mix00000001", title="Mix", artist="Techno Llama", duration=3801)
+    add_file("Music/Techno Llama/Singles/Song.m4a", "song0000001", title="Song", artist="Techno Llama", duration=200)
+    lyrics.backfill_lyrics()
+    assert (config.META_DIR / "mix00000001.nolyrics").exists()
+    assert (config.META_DIR / "song0000001.nolyrics").exists()   # the backfill went on
+    assert len(asked) == 4   # get + search for each
