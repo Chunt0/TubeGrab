@@ -138,9 +138,11 @@ export interface Playlist {
   files?: LibraryFile[];
 }
 
-/** Hearted artists (names), albums (collection keys) and songs (songRef). */
+/** Hearted (or disliked) artists (names), albums (collection keys) and songs (songRef). */
 export interface Favorites { artists: string[]; albums: string[]; songs: string[] }
 export type FavoriteKind = "artist" | "album" | "song";
+/** fav: hearted · dislike: disliked (only recorded, for agents; the app hides nothing). An item has at most one. */
+export type Mark = "fav" | "dislike";
 /** How favorites (and playlists) refer to a file: survives renames and re-filing. */
 export const songRef = (f: Pick<LibraryFile, "id" | "kind" | "name">) => (f.id ? `${f.id}:${f.kind}` : `path:${f.name}`);
 
@@ -176,6 +178,7 @@ export const urls = {
   playlists: "/api/playlists",
   progress: "/api/progress",
   favorites: "/api/favorites",
+  dislikes: "/api/dislikes",
   playlist: (id: string) => `/api/playlists/${encodeURIComponent(id)}`,
   watch: (name: string, list?: string | null) => `/api/watch/${encPath(name)}${qs({ list })}`,
   files: (p: { dir?: string; section?: "Music" | "videos"; kind?: string; q?: string; sort?: string; fav?: 1 }) => `/api/files${qs(p)}`,
@@ -207,7 +210,8 @@ export const api = {
   },
   download: (url: string, format: Format, playlist: boolean) =>
     req<{ job: Job }>("/api/download", post({ url, format, playlist })).then((r) => r.job),
-  setFavorite: (kind: FavoriteKind, id: string, on: boolean) => req<Favorites>("/api/favorites", post({ kind, id, on })),
+  setMark: (mark: Mark, kind: FavoriteKind, id: string, on: boolean) =>
+    req<Favorites>(mark === "fav" ? "/api/favorites" : "/api/dislikes", post({ kind, id, on })),
   cancel: (id: string) => req(`/api/jobs/${id}/cancel`, { method: "POST" }),
   remove: (name: string) => req("/api/files/delete", post({ name })),
   setCover: (key: string, name: string) => req("/api/collections/cover", post({ key, name })),

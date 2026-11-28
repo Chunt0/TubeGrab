@@ -450,6 +450,59 @@ def test_a_hearted_song_stays_hearted_when_moved(client):
     assert [f["name"] for f in client.get("/api/files?fav=1").get_json()["files"]] == [r.get_json()["name"]]
 
 
+def dislike(client, kind, ident, on=True):
+    return client.post("/api/dislikes", json={"kind": kind, "id": ident, "on": on})
+
+
+def test_dislikes_are_kept_like_favorites(client):
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    reindex()
+    dislike(client, "artist", "Primus")
+    dislike(client, "album", "Music/Primus/Frizzle Fry (1990)")
+    r = dislike(client, "song", "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a").get_json()
+    assert r == {"artists": ["Primus"], "albums": ["Music/Primus/Frizzle Fry (1990)"], "songs": ["p0000000001:audio"]}
+    assert client.get("/api/dislikes").get_json() == r
+    assert client.get("/api/favorites").get_json() == {"artists": [], "albums": [], "songs": []}
+    reindex()
+    assert client.get("/api/files?section=Music").get_json()["total"] == 1   # nothing hidden
+    for kind, ident in (("artist", "Primus"), ("album", "Music/Primus/Frizzle Fry (1990)"),
+                        ("song", "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a")):
+        dislike(client, kind, ident, on=False)
+    assert client.get("/api/dislikes").get_json() == {"artists": [], "albums": [], "songs": []}
+    assert json.loads(config.FOLDERS_FILE.read_text() or "{}") == {}
+    assert dislike(client, "song", "Music/missing.m4a").status_code == 400
+
+
+def test_a_heart_takes_a_dislike_away_and_back(client):
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    reindex()
+    song, album = "Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "Music/Primus/Frizzle Fry (1990)"
+    for kind, ident in (("artist", "Primus"), ("album", album), ("song", song)):
+        fav(client, kind, ident)
+        dislike(client, kind, ident)
+    assert client.get("/api/favorites").get_json() == {"artists": [], "albums": [], "songs": []}
+    for kind, ident in (("artist", "Primus"), ("album", album), ("song", song)):
+        fav(client, kind, ident)
+    assert client.get("/api/dislikes").get_json() == {"artists": [], "albums": [], "songs": []}
+    assert client.get("/api/favorites").get_json()["songs"] == ["p0000000001:audio"]
+    dislike(client, "song", song, on=False)   # un-disliking leaves the heart alone
+    assert client.get("/api/favorites").get_json()["songs"] == ["p0000000001:audio"]
+
+
+# ---------------------------------------------------------------- up next
+
+def test_an_album_plays_to_its_end_and_stops(client):
+    add_file("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a", "p0000000001", title="To Defy", artist="Primus")
+    add_file("Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a", "p0000000002", title="Groundhog", artist="Primus")
+    add_file("Music/Melvins/Houdini (1993)/01 - Hooch.m4a", "m0000000001", title="Hooch", artist="Melvins")
+    add_file("Music/Melvins/Singles/Night Goat.m4a", "m0000000002", title="Night Goat", artist="Melvins")
+    reindex()
+    up = lambda name: [f["title"] for f in client.get(f"/api/watch/{name}").get_json()["next"]]
+    assert up("Music/Primus/Frizzle Fry (1990)/01 - To Defy.m4a") == ["Groundhog"]
+    assert up("Music/Primus/Frizzle Fry (1990)/02 - Groundhog.m4a") == []
+    assert up("Music/Melvins/Singles/Night Goat.m4a")   # outside albums: carries on with the newest music
+
+
 # ---------------------------------------------------------------- plays
 
 def test_plays_count_up_and_sort(client):

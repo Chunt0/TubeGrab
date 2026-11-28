@@ -16,7 +16,7 @@ list; the two exceptions are deferred imports, marked where they are made):
     albums        recognising fan-upload playlists as albums (MusicBrainz)
     genres        album and artist genres (MusicBrainz)
     playlists     your playlists
-    favorites     hearted artists, albums and songs
+    favorites     hearted and disliked artists, albums and songs
     index         the background indexer
     jobs          downloads (yt-dlp)
     moves         Music ⇄ Videos

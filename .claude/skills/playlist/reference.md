@@ -25,6 +25,8 @@ library *name* is a file's path inside the library, e.g.
   `last_played` (ISO time or null). Answer: `{total, files}`.
 - `GET /api/favorites`: `{artists: [name], albums: [collection key], songs: [ref]}`.
   A song's ref is `"<id>:<kind>"`, or `"path:<name>"` for a file without an id.
+- `GET /api/dislikes`: the same shape: what the user marked as disliked. The app
+  only records these (nothing is hidden); an item is never both hearted and disliked.
 - `GET /api/playlists`: `playlists[]`: `id`, `title`, `description`, `items`
   (names, in order), `count`, `duration`.
 - `GET /api/playlists/<id>`: the same plus `files` (full file entries).
@@ -36,7 +38,16 @@ library *name* is a file's path inside the library, e.g.
 - `PATCH /api/playlists/<id>` with any of `{title, description, items}`
   (`items`: the whole new list, in order).
 - `POST /api/favorites` `{kind: "artist"|"album"|"song", id, on}`: id is the
-  artist name, the album's collection key, or the song's name.
+  artist name, the album's collection key, or the song's name. Answer: the
+  favorites. Hearting something takes away its dislike.
+- `POST /api/dislikes`: the same for dislikes (disliking takes away the heart).
+- `POST /api/files/delete` `{name}`: deletes one file for good.
+- `POST /api/collections/delete` `{key}`: deletes an album or singles folder and
+  every file in it (409 while downloads run). Deleting is for good: only when the
+  user asked, after they've seen the list.
+
+A song dislike is kept after its file is deleted (it then matches no file); an
+album's goes with its folder.
 
 Playlists reference files (by id, so they survive renames and re-filing); they
 never copy or change the music. The web page for a playlist is `/p/<id>`.

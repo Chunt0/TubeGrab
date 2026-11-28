@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Heart } from "../components/Heart";
+import { Dislike, Heart } from "../components/Heart";
 import { ArrowLeft, CheckCheck, Download, Film, ListPlus, Mic2, Music, RotateCcw, Trash2 } from "lucide-react";
 import { useStore } from "../store";
 import { Link, artistPath, collectionPath, playlistPath, useRouter, watchPath } from "../router";
@@ -125,7 +125,7 @@ export function Watch({ name }: { name: string }) {
   const { setList } = player;
   useEffect(() => { if (view) setList(pl ? pl.id : null); }, [view, pl?.id, setList]); // eslint-disable-line react-hooks/exhaustive-deps
   const music = file?.section === "Music";
-  // Queue: rest of this playlist / collection, then the newest from the same section.
+  // Queue: rest of this playlist / album (and it ends there), or of the folder, then the newest from the same section.
   const upNext = view?.next ?? [];
   const next = upNext[0] ?? null;
 
@@ -199,7 +199,10 @@ export function Watch({ name }: { name: string }) {
                 )}
               </p>
             </div>
-            {music && <Heart kind="song" id={file.name} file={file} className="-mt-1" />}
+            {music && <>
+              <Heart kind="song" id={file.name} file={file} className="-mt-1" />
+              <Dislike kind="song" id={file.name} file={file} className="-mt-1 -ml-1" />
+            </>}
             <Menu className="-mr-2 -mt-1">
               {(close) => (
                 <>

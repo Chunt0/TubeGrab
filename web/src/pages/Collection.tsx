@@ -10,7 +10,7 @@ import { VideoCard } from "../components/VideoCard";
 import { KIND_LABEL } from "../components/CollectionCard";
 import { EditCollection } from "../components/EditCollection";
 import { TrackRow } from "./Music";
-import { Heart } from "../components/Heart";
+import { Dislike, Heart } from "../components/Heart";
 import { usePaged } from "../lib/cache";
 
 const GRID = "grid grid-cols-1 gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
@@ -43,7 +43,10 @@ function Actions({ c, onEdit, onCover, onDelete, onMove }:
       {c.count > 1 && (
         <button onClick={shuffle} className="flex h-8 items-center rounded-sm border border-line-strong px-3 text-[13px] hover:bg-white/5">Shuffle</button>
       )}
-      {c.section === "Music" && c.kind === "album" && <Heart kind="album" id={c.key} boxed />}
+      {c.section === "Music" && c.kind === "album" && <>
+        <Heart kind="album" id={c.key} boxed />
+        <Dislike kind="album" id={c.key} boxed />
+      </>}
       <Menu>
         {(close) => (
           <>

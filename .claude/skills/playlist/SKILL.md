@@ -1,6 +1,6 @@
 ---
 name: playlist
-description: Make or change playlists from the user's TubeGrab music library (their self-hosted YouTube/SoundCloud library on the NAS). Use when they ask for a playlist, a mix, "songs for …", "something like …", a playlist from their favorites or most played, or to add to / reorder / rename one of their playlists. Also for questions about what's in their music library (genres, artists, what they play most).
+description: Make or change playlists from the user's TubeGrab music library (their self-hosted YouTube/SoundCloud library on the NAS). Use when they ask for a playlist, a mix, "songs for …", "something like …", a playlist from their favorites or most played, or to add to / reorder / rename one of their playlists. Also for questions about what's in their music library (genres, artists, what they play most, what they dislike), and for clearing out songs or albums they disliked.
 ---
 
 # Playlists from the TubeGrab library
@@ -52,6 +52,26 @@ $TG songs -h              # every filter
 - **Title and description:** short and plain; the description says what it is
   ("90s alternative, loud to quiet"), not how it was made.
 - Don't change or rename the user's existing playlists unless asked.
+- **Dislikes:** `songs` already leaves out disliked songs and the songs of
+  disliked albums and artists. Don't add them back (`--with-disliked`) unless
+  asked, and steer away from what's close to them.
+
+## Dislikes and deleting
+
+The user marks songs, albums and artists they don't like in the app (👎); the
+app only records it. `$TG dislikes` lists them (with album keys and song ids).
+
+When they ask you to clean up or delete what they disliked:
+
+1. Show what would go: `$TG delete ID… --album KEY… --artist NAME` without
+   `--yes` lists the files and the count, and deletes nothing.
+2. Deleting is for good (no trash). Go ahead only when they've seen that list
+   and said yes, or when they named exactly what to delete; then run the same
+   command with `--yes`. Never delete things they didn't dislike or name.
+3. Downloads must be finished for albums (`Wait for downloads to finish first`):
+   try again later.
+
+`$TG dislike|undislike song|album|artist X…` changes the marks, only when they ask.
 
 ## When something's off
 

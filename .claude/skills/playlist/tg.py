@@ -14,6 +14,12 @@ changes playlists from song ids. Standard library only.
     tg.py add PLAYLIST_ID ID…                     append songs
     tg.py replace PLAYLIST_ID ID…                 new song list, in this order
     tg.py rename PLAYLIST_ID "Title" [-d "Description"]
+    tg.py dislikes                                what the user marked as disliked
+    tg.py dislike|undislike song|album|artist X…  mark or unmark (only when the user asks)
+    tg.py delete ID… | --album KEY… | --artist A  delete files: shows what would go; --yes deletes
+
+Disliked songs (and the songs of disliked albums / artists) are left out of
+`songs` unless --disliked or --with-disliked asks for them.
 
 A song's id is the first column of `songs` (its YouTube id, or its library path
 for files without one). Server: $TUBEGRAB_URL, else the NAS on the LAN.
@@ -59,9 +65,10 @@ def fold(s):
 # ---------------------------------------------------------------- loading
 
 def load():
-    """Albums (with genres), every song (with plays, genres, favorites)."""
+    """Albums (with genres), every song (with plays, genres, favorites, dislikes)."""
     lib = call("/api/library")
     favs = call("/api/favorites")
+    bad = call("/api/dislikes")
     albums = [c for c in lib["collections"] if c["section"] == "Music"]
     genres = {c["key"]: c.get("genres") or [] for c in albums}
     songs, offset = [], 0
@@ -72,14 +79,19 @@ def load():
         if not page["files"] or offset >= page["total"]:
             break
     fav_songs, fav_albums, fav_artists = set(favs["songs"]), set(favs["albums"]), set(favs["artists"])
+    bad_songs, bad_albums, bad_artists = set(bad["songs"]), set(bad["albums"]), set(bad["artists"])
     for f in songs:
         f["sid"] = f["id"] or f["name"]
+        f["ref"] = f"{f['id']}:{f['kind']}" if f["id"] else f"path:{f['name']}"
         f["genres"] = genres.get(f["collection"], [])
-        f["fav"] = (f"{f['id']}:{f['kind']}" if f["id"] else f"path:{f['name']}") in fav_songs
+        f["fav"] = f["ref"] in fav_songs
         f["fav_any"] = f["fav"] or f["collection"] in fav_albums or (f["artist"] or "") in fav_artists
+        f["bad"] = f["ref"] in bad_songs
+        f["bad_any"] = f["bad"] or f["collection"] in bad_albums or (f["artist"] or "") in bad_artists
     for c in albums:
         c["fav"] = c["key"] in fav_albums
-    return albums, songs, favs
+        c["bad"] = c["key"] in bad_albums or (c["artist"] or "") in bad_artists
+    return albums, songs, favs | {"dislikes": bad}
 
 
 def years(spec):
@@ -135,6 +147,9 @@ def cmd_stats(a):
     played = [f for f in songs if f["plays"]]
     print(f"played: {len(played)} songs, {sum(f['plays'] for f in songs)} plays in all")
     print(f"favorites: {len(favs['artists'])} artists · {len(favs['albums'])} albums · {len(favs['songs'])} songs")
+    bad = favs["dislikes"]
+    print(f"disliked: {len(bad['artists'])} artists · {len(bad['albums'])} albums · {len(bad['songs'])} songs "
+          f"({sum(f['bad_any'] for f in songs)} songs left out of `songs`; see `dislikes`)")
     looked = sum(1 for c in albums if c.get("genres"))
     print(f"genres known for {looked} of {len(albums)} folders")
     g = Counter(x for f in songs for x in f["genres"])
@@ -159,16 +174,18 @@ def cmd_albums(a):
     rows = [c for c in albums
             if (not a.genre or any_in(a.genre, *(c.get("genres") or [])))
             and (not a.artist or any_in(a.artist, c["artist"]))
-            and in_years(c.get("year"), a.years) and (not a.fav or c["fav"])]
+            and in_years(c.get("year"), a.years) and (not a.fav or c["fav"]) and (not a.disliked or c["bad"])]
     rows.sort(key=lambda c: (fold(c["artist"] or ""), c.get("year") or ""))
-    table(["artist", "album", "year", "tracks", "genres", "fav"],
+    table(["artist", "album", "year", "tracks", "genres", "fav", "key"],
           [(c["artist"], "Singles" if c["kind"] == "singles" else c["title"], c.get("year"), c["count"],
-            ", ".join(c.get("genres") or []), "♥" if c["fav"] else "") for c in rows], a.limit)
+            ", ".join(c.get("genres") or []), "♥" if c["fav"] else ("✗" if c["bad"] else ""), c["key"]) for c in rows], a.limit)
 
 
 def pick_songs(a, songs):
     out = []
     for f in songs:
+        if a.disliked and not f["bad_any"] or not (a.disliked or a.with_disliked) and f["bad_any"]:
+            continue
         if a.genre and not any_in(a.genre, *f["genres"]):
             continue
         if a.not_genre and any_in(a.not_genre, *f["genres"]):
@@ -214,13 +231,17 @@ def pick_songs(a, songs):
     return out   # default: artist, album, track order (as loaded)
 
 
+def mark(f):
+    return "✗" if f["bad"] else "x" if f["bad_any"] else "♥" if f["fav"] else "·" if f["fav_any"] else ""
+
+
 def cmd_songs(a):
     _, songs, _ = load()
     rows = pick_songs(a, songs)
     table(["id", "artist", "album", "year", "title", "length", "plays", "last played", "genres", "fav"],
           [(f["sid"], f["artist"], f["album"] or ("Singles" if f["collection"].endswith("/Singles") else ""),
             f.get("year"), f["title"], mmss(f["duration"]), f["plays"] or "", day(f["last_played"]),
-            ", ".join(f["genres"]), "♥" if f["fav"] else ("·" if f["fav_any"] else "")) for f in rows], a.limit)
+            ", ".join(f["genres"]), mark(f)) for f in rows], a.limit)
     if rows:
         print(f"({len(rows)} songs, {sum(f['duration'] or 0 for f in rows) / 60:.0f} min)")
 
@@ -230,14 +251,21 @@ def resolve(ids):
     if not ids or ids == ["-"]:
         ids = [line.split("\t")[0].strip() for line in sys.stdin if line.strip() and not line.startswith(("id\t", "…", "("))]
     _, songs, _ = load()
-    by = {f["sid"]: f["name"] for f in songs} | {f["name"]: f["name"] for f in songs}
-    names, missing = [], []
+    by = {}
+    for f in songs:
+        by.setdefault(f["sid"], set()).add(f["name"])
+        by[f["name"]] = {f["name"]}
+    names, missing, unclear = [], [], []
     for i in ids:
         n = by.get(i)
-        if n is None:
+        if not n:
             missing.append(i)
-        elif n not in names:
+        elif len(n) > 1:   # one YouTube id, two files (audio and video): say which
+            unclear.append(f"{i} ({' / '.join(sorted(n))})")
+        elif (n := next(iter(n))) not in names:
             names.append(n)
+    if unclear:
+        sys.exit(f"tg: more than one file has the id {'; '.join(unclear)}: give the library path instead")
     if missing:
         sys.exit(f"tg: not in the library: {', '.join(missing[:20])}{' …' if len(missing) > 20 else ''}")
     if not names:
@@ -288,6 +316,66 @@ def cmd_rename(a):
     say_playlist(call(f"/api/playlists/{a.id}", patch, "PATCH")["playlist"])
 
 
+def cmd_dislikes(a):
+    albums, songs, favs = load()
+    bad = favs["dislikes"]
+    print("disliked artists:", ", ".join(bad["artists"]) or "none")
+    keys = {c["key"]: c for c in albums}
+    print("\ndisliked albums:")
+    table(["key", "artist", "album", "year", "tracks"],
+          [(k, keys[k]["artist"], keys[k]["title"], keys[k].get("year"), keys[k]["count"]) for k in bad["albums"] if k in keys])
+    by_ref = {f["ref"]: f for f in songs}
+    print("\ndisliked songs:")
+    table(["id", "artist", "album", "title", "length", "plays"],
+          [(f["sid"], f["artist"], f["album"], f["title"], mmss(f["duration"]), f["plays"] or "")
+           for f in (by_ref[r] for r in bad["songs"] if r in by_ref)])
+    gone = [r for r in bad["songs"] if r not in by_ref]
+    if gone:
+        print(f"\n({len(gone)} disliked songs are no longer in the library: {', '.join(gone[:20])})")
+
+
+def cmd_mark(a):
+    path = "/api/dislikes"
+    ids = resolve(a.ids) if a.kind == "song" else a.ids
+    for i in ids:
+        call(path, {"kind": a.kind, "id": i, "on": a.cmd == "dislike"})
+    print(f"{'disliked' if a.cmd == 'dislike' else 'no longer disliked'}: {len(ids)} {a.kind}{'s' if len(ids) != 1 else ''}")
+
+
+def cmd_delete(a):
+    """Deletes files for good. Without --yes it only lists them."""
+    albums, songs, _ = load()
+    keys = {c["key"]: c for c in albums}
+    folders = list(a.album or [])
+    for name in a.artist or []:
+        found = [c["key"] for c in albums if fold(c["artist"] or "") == fold(name)]
+        if not found:
+            sys.exit(f"tg: no albums by {name!r}")
+        folders += found
+    missing = [k for k in folders if k not in keys]
+    if missing:
+        sys.exit(f"tg: not an album key: {', '.join(missing)} (see `albums` or `dislikes`)")
+    names = resolve(a.ids) if a.ids else []
+    names = [n for n in names if not any(n.startswith(k + "/") for k in folders)]
+    if not names and not folders:
+        sys.exit("tg: nothing to delete")
+    by = {f["name"]: f for f in songs}
+    for k in folders:
+        c = keys[k]
+        print(f"album\t{c['artist']}\t{c['title']}\t{c['count']} tracks\t{k}")
+    for n in names:
+        print(f"song\t{by[n]['artist']}\t{by[n]['title']}\t{n}")
+    count = len(names) + sum(keys[k]["count"] for k in folders)
+    if not a.yes:
+        print(f"({count} files would be deleted for good; run again with --yes once the user has agreed)")
+        return
+    for k in folders:
+        call("/api/collections/delete", {"key": k})
+    for n in names:
+        call("/api/files/delete", {"name": n})
+    print(f"deleted {count} files")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="tg.py", description="TubeGrab library and playlists.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -298,6 +386,7 @@ def main():
     al.add_argument("--artist", action="append")
     al.add_argument("--years", help="1990-1999, or 1994")
     al.add_argument("--fav", action="store_true", help="hearted albums only")
+    al.add_argument("--disliked", action="store_true", help="disliked albums (or by disliked artists) only")
     al.add_argument("--limit", type=int, default=400)
     al.set_defaults(fn=cmd_albums)
 
@@ -311,6 +400,8 @@ def main():
     so.add_argument("--years", help="1990-1999, or 1994")
     so.add_argument("--fav", action="store_true", help="hearted songs")
     so.add_argument("--fav-any", action="store_true", help="hearted songs, or songs of hearted albums / artists")
+    so.add_argument("--disliked", action="store_true", help="only disliked songs, or songs of disliked albums / artists")
+    so.add_argument("--with-disliked", action="store_true", help="don't leave disliked songs out")
     so.add_argument("--min-plays", type=int, default=0)
     so.add_argument("--unplayed", action="store_true", help="never played")
     so.add_argument("--not-since", type=int, metavar="DAYS", help="not played in the last DAYS days (or never)")
@@ -340,6 +431,19 @@ def main():
     rn.add_argument("title")
     rn.add_argument("-d", "--description")
     rn.set_defaults(fn=cmd_rename)
+
+    sub.add_parser("dislikes", help="what the user dislikes").set_defaults(fn=cmd_dislikes)
+    for name in ("dislike", "undislike"):
+        p = sub.add_parser(name, help=f"{name} songs (ids), albums (keys) or artists (names)")
+        p.add_argument("kind", choices=["song", "album", "artist"])
+        p.add_argument("ids", nargs="+")
+        p.set_defaults(fn=cmd_mark)
+    de = sub.add_parser("delete", help="delete songs / albums from the library (lists them first)")
+    de.add_argument("ids", nargs="*", help="song ids")
+    de.add_argument("--album", action="append", metavar="KEY", help="an album's key (repeat)")
+    de.add_argument("--artist", action="append", help="every album and single of this artist (repeat)")
+    de.add_argument("--yes", action="store_true", help="really delete (only after the user agreed)")
+    de.set_defaults(fn=cmd_delete)
 
     a, extra = ap.parse_known_args()   # (ids may come after -d too: create "T" -d "D" ID…)
     if extra and hasattr(a, "ids") and not any(x.startswith("-") and x != "-" for x in extra):

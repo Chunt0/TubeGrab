@@ -107,7 +107,8 @@ def api_files():
 @bp.get("/api/watch/<path:name>")
 def api_watch(name: str):
     """One file plus what plays around it: the rest of its playlist (?list=) or
-    album/collection, then the newest from the same section."""
+    album, which is where playing stops; in other folders (channels, singles…)
+    the rest of the folder, then the newest from the same section."""
     con = _db()
     r = con.execute(f"SELECT {_OUT_COLS}, f.chapters FROM files f LEFT JOIN colors k ON k.tv=f.tv WHERE f.name=?",
                     (name,)).fetchone()
@@ -130,6 +131,7 @@ def api_watch(name: str):
             out["prev"] = rows.get(names[i - 1]) if i > 0 else None
             return _cached_json(_json_bytes(out))
     after: list[dict] = []
+    kind = None
     if f["collection"]:
         kind = coll["kind"] if coll else _collection_info(f["collection"])["kind"]
         members = [x["name"] for x in con.execute(
@@ -140,7 +142,7 @@ def api_watch(name: str):
         after = [rows[n] for n in members[i + 1:i + 25] if n in rows]
         if i > 0 and kind in ("album", "playlist"):
             out["prev"] = rows.get(members[i - 1])
-    if len(after) < 24:
+    if len(after) < 24 and kind != "album":
         music = f["section"] == "Music"
         rest = con.execute(
             f"SELECT {_OUT_COLS} FROM files f LEFT JOIN colors k ON k.tv=f.tv WHERE f.dir!=? AND f.name!=? "

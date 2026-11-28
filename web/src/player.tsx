@@ -179,8 +179,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const go = useCallback((f: LibraryFile, back = false) => {
     goingBack.current = back;
+    // start it now, then follow on the page: waiting for the next page to load first
+    // stalls a locked phone (the browser suspends the page once nothing is playing)
+    open(f);
     if (live.current.mode === "page") navigate(watchPath(f.name, live.current.list));
-    else open(f); // stays in PiP / mini player
   }, [navigate, open]);
 
   /** the queue for the current file (waits for it if it's still loading) */
@@ -191,6 +193,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const next = useCallback(() => {
+    const q = live.current.queue;   // loaded while this one played: switch within the "ended" event
+    if (q) { if (q.next[0]) go(q.next[0]); return; }
     currentQueue().then((q) => { const n = q?.next[0]; if (n) go(n); });
   }, [go, currentQueue]);
 

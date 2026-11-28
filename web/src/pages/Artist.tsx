@@ -6,7 +6,7 @@ import { api } from "../api";
 import { bytes, longDuration } from "../lib/format";
 import { AlbumCard } from "../components/CollectionCard";
 import { ALBUM_GRID, SectionHead } from "./Music";
-import { Heart } from "../components/Heart";
+import { Dislike, Heart } from "../components/Heart";
 
 export function ArtistPage({ name }: { name: string }) {
   const { library } = useStore();
@@ -49,6 +49,7 @@ export function ArtistPage({ name }: { name: string }) {
             <button onClick={shuffle} className="flex h-8 items-center rounded-sm border border-line-strong px-3 text-[13px] hover:bg-white/5">Shuffle</button>
           )}
           <Heart kind="artist" id={name} boxed />
+          <Dislike kind="artist" id={name} boxed />
         </div>
       </header>
       <section className="mt-6">

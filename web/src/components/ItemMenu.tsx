@@ -1,6 +1,6 @@
-import { CheckCheck, Film, Heart, HeartOff, ListPlus, Music, RotateCcw } from "lucide-react";
+import { CheckCheck, Film, Heart, HeartOff, ListPlus, Music, RotateCcw, ThumbsDown } from "lucide-react";
 import { resumable, type LibraryFile } from "../api";
-import { useFavorite, useStore } from "../store";
+import { useFavorite, useMark, useStore } from "../store";
 import { cx } from "../lib/format";
 import { Menu, MenuItem } from "./ui";
 
@@ -10,6 +10,7 @@ export function ItemMenu({ file, className }: { file: LibraryFile; className?: s
   const toMusic = file.section !== "Music";
   const watched = !!progress[file.name]?.watched;
   const [fav, toggleFav] = useFavorite("song", file.name, file);
+  const [disliked, toggleDislike] = useMark("dislike", "song", file.name, file);
   return (
     <Menu className={cx("opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100", className)}>
       {(close) => (
@@ -17,6 +18,11 @@ export function ItemMenu({ file, className }: { file: LibraryFile; className?: s
           {file.section === "Music" && (
             <MenuItem icon={fav ? HeartOff : Heart} onClick={() => { close(); toggleFav(); }}>
               {fav ? "Remove from favorites" : "Add to favorites"}
+            </MenuItem>
+          )}
+          {file.section === "Music" && (
+            <MenuItem icon={ThumbsDown} onClick={() => { close(); toggleDislike(); }}>
+              {disliked ? "Remove dislike" : "Dislike"}
             </MenuItem>
           )}
           <MenuItem icon={ListPlus} onClick={() => { close(); openAddToPlaylist([file.name], file.title); }}>Add to playlist…</MenuItem>

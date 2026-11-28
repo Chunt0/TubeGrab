@@ -89,7 +89,8 @@ Image → Import (the NAS must have the same CPU architecture).
   remembered), sorted by name with A–Z headings and a jump rail (drag it on a
   phone), or by year with decades; back returns to the same spot. **Favorites**:
   heart artists, albums and songs (artist and album pages, track rows, the
-  player); the Favorites switch shows just those in each tab. Album pages
+  player); the Favorites switch shows just those in each tab. **Dislike** (👎 next
+  to the heart, or a track's ⋯ menu) only records it, for an agent to read. Album pages
   with track lists; **Videos** (`/videos`): channels, playlists, recent videos.
   Play all / Shuffle everywhere; Up next follows album/playlist order
 - **Library** (`/`) like a personal YouTube: thumbnail grid
@@ -200,10 +201,12 @@ the link). Its `tg.py` works on its own too: `tg.py stats`, `tg.py songs
 --genre jazz --sort plays`, `… | tg.py create "Title" -`. To use it from any
 folder: `ln -s "$PWD/.claude/skills/playlist" ~/.claude/skills/playlist`.
 
-What it knows per song: artist, album, year, length, favorites, how often and
+What it knows per song: artist, album, year, length, favorites, dislikes, how often and
 when you played it (a play: half the song or 4 minutes), and genres, which the
 NAS fetches from MusicBrainz in the background (the album's, else the artist's;
-only names are sent).
+only names are sent). It leaves disliked songs out of playlists, and on request
+lists what you disliked (`tg.py dislikes`) and deletes it (`tg.py delete`, which
+shows what would go and needs `--yes`).
 
 ## Legal note
 

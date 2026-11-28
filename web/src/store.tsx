@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, isActive, songRef, urls, type Collection, type Favorites, type FavoriteKind, type Format, type Job, type Library, type LibraryFile, type Playlist, type PlaylistPatch } from "./api";
+import { api, isActive, songRef, urls, type Collection, type Favorites, type FavoriteKind, type Format, type Mark, type Job, type Library, type LibraryFile, type Playlist, type PlaylistPatch } from "./api";
 import { fetchQuery, revalidateAll, setQueryData, setVersion, useQuery } from "./lib/cache";
 
 export interface Progress { pos: number; watched: boolean }
@@ -40,8 +40,9 @@ interface Store {
   toast: (t: Omit<Toast, "id">) => void;
   dismiss: (id: number) => void;
   favorites: Favorites;
-  /** heart / un-heart: an artist name, an album key, or a song (library name; `ref` = its songRef) */
-  setFavorite: (kind: FavoriteKind, id: string, on: boolean, ref?: string) => void;
+  dislikes: Favorites;
+  /** heart / dislike (or undo): an artist name, an album key, or a song (library name; `ref` = its songRef) */
+  setMark: (mark: Mark, kind: FavoriteKind, id: string, on: boolean, ref?: string) => void;
   grabOpen: boolean;
   grabPrefill: string;
   openGrab: (prefill?: string) => void;
@@ -55,6 +56,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const lib = useQuery<Library>(urls.library);
   const pls = useQuery<{ playlists: Playlist[] }>(urls.playlists);
   const favs = useQuery<Favorites>(urls.favorites);
+  const dislikes = useQuery<Favorites>(urls.dislikes);
   const [progress, setProgress] = useState<Record<string, Progress>>({});
   const [addTarget, setAddTarget] = useState<Store["addTarget"]>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -229,20 +231,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setAddTarget({ names, label: label ?? `${names.length} ${names.length === 1 ? "item" : "items"}` }), []);
   const closeAddToPlaylist = useCallback(() => setAddTarget(null), []);
 
-  const setFavorite = useCallback((kind: FavoriteKind, id: string, on: boolean, ref?: string) => {
+  const setMark = useCallback((mark: Mark, kind: FavoriteKind, id: string, on: boolean, ref?: string) => {
     const list = kind === "artist" ? "artists" : kind === "album" ? "albums" : "songs";
     const item = kind === "song" ? ref ?? id : id;
-    let before: Favorites | undefined;
-    setQueryData<Favorites>(urls.favorites, (old) => {   // straight away; the server's answer follows
-      before = old;
+    const url = mark === "fav" ? urls.favorites : urls.dislikes;
+    const other = mark === "fav" ? urls.dislikes : urls.favorites;   // marking takes the other mark away
+    const before: Record<string, Favorites | undefined> = {};
+    const apply = (u: string, add: boolean) => setQueryData<Favorites>(u, (old) => {   // straight away; the server's answer follows
+      before[u] = old;
       const cur = old ?? NO_FAVORITES;
       const rest = cur[list].filter((x) => x !== item);
-      return { ...cur, [list]: on ? [item, ...rest] : rest };
+      return { ...cur, [list]: add ? [item, ...rest] : rest };
     });
-    api.setFavorite(kind, id, on)
-      .then((f) => setQueryData<Favorites>(urls.favorites, () => f))
+    apply(url, on);
+    if (on) apply(other, false);
+    api.setMark(mark, kind, id, on)
+      .then((f) => setQueryData<Favorites>(url, () => f))
       .catch((e) => {
-        setQueryData<Favorites>(urls.favorites, () => before);
+        for (const [u, old] of Object.entries(before)) setQueryData<Favorites>(u, () => old);
         toast({ kind: "bad", title: "Couldn't save", body: e instanceof Error ? e.message : String(e) });
       });
   }, [toast]);
@@ -258,7 +264,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       playlists: pls.data?.playlists ?? [], playlistsLoaded: !!pls.data,
       createPlaylist, updatePlaylist, deletePlaylist, uploadPlaylistCover, addTarget, openAddToPlaylist, closeAddToPlaylist,
       toasts, toast, dismiss, grabOpen, grabPrefill, openGrab, closeGrab,
-      favorites: favs.data ?? NO_FAVORITES, setFavorite,
+      favorites: favs.data ?? NO_FAVORITES, dislikes: dislikes.data ?? NO_FAVORITES, setMark,
     }}>
       {children}
     </Ctx.Provider>
@@ -277,12 +283,15 @@ export function useWatchedCount(key: string): number | null {
   return library?.watched[key] || null;
 }
 
-/** Whether this artist / album / song is hearted, and a toggle. */
-export function useFavorite(kind: FavoriteKind, id: string, file?: LibraryFile): [boolean, () => void] {
-  const { favorites, setFavorite } = useStore();
+/** Whether this artist / album / song is hearted (or disliked), and a toggle. */
+export function useMark(mark: Mark, kind: FavoriteKind, id: string, file?: LibraryFile): [boolean, () => void] {
+  const { favorites, dislikes, setMark } = useStore();
+  const lists = mark === "fav" ? favorites : dislikes;
   const ref = file ? songRef(file) : undefined;
-  const on = kind === "artist" ? favorites.artists.includes(id)
-    : kind === "album" ? favorites.albums.includes(id)
-    : favorites.songs.includes(ref ?? id);
-  return [on, () => setFavorite(kind, id, !on, ref)];
+  const on = kind === "artist" ? lists.artists.includes(id)
+    : kind === "album" ? lists.albums.includes(id)
+    : lists.songs.includes(ref ?? id);
+  return [on, () => setMark(mark, kind, id, !on, ref)];
 }
+
+export const useFavorite = (kind: FavoriteKind, id: string, file?: LibraryFile) => useMark("fav", kind, id, file);
