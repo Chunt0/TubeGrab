@@ -1,6 +1,7 @@
-import { CheckCheck, Film, Heart, HeartOff, ListPlus, Music, RotateCcw, ThumbsDown } from "lucide-react";
+import { CheckCheck, Film, Heart, HeartOff, ListPlus, Music, RotateCcw } from "lucide-react";
 import { resumable, type LibraryFile } from "../api";
 import { useFavorite, useMark, useStore } from "../store";
+import { BrokenHeart } from "./Heart";
 import { cx } from "../lib/format";
 import { Menu, MenuItem } from "./ui";
 
@@ -21,7 +22,7 @@ export function ItemMenu({ file, className }: { file: LibraryFile; className?: s
             </MenuItem>
           )}
           {file.section === "Music" && (
-            <MenuItem icon={ThumbsDown} onClick={() => { close(); toggleDislike(); }}>
+            <MenuItem icon={BrokenHeart} onClick={() => { close(); toggleDislike(); }}>
               {disliked ? "Remove dislike" : "Dislike"}
             </MenuItem>
           )}

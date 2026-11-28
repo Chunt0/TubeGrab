@@ -89,7 +89,7 @@ Image → Import (the NAS must have the same CPU architecture).
   remembered), sorted by name with A–Z headings and a jump rail (drag it on a
   phone), or by year with decades; back returns to the same spot. **Favorites**:
   heart artists, albums and songs (artist and album pages, track rows, the
-  player); the Favorites switch shows just those in each tab. **Dislike** (👎 next
+  player); the Favorites switch shows just those in each tab. **Dislike** (broken heart next
   to the heart, or a track's ⋯ menu) only records it, for an agent to read. Album pages
   with track lists; **Videos** (`/videos`): channels, playlists, recent videos.
   Play all / Shuffle everywhere; Up next follows album/playlist order

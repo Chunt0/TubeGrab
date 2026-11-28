@@ -58,7 +58,7 @@ $TG songs -h              # every filter
 
 ## Dislikes and deleting
 
-The user marks songs, albums and artists they don't like in the app (👎); the
+The user marks songs, albums and artists they don't like in the app (a broken heart); the
 app only records it. `$TG dislikes` lists them (with album keys and song ids).
 
 When they ask you to clean up or delete what they disliked:

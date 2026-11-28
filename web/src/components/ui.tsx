@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentType, type ReactNode } from "react";
 import { MoreHorizontal, X } from "lucide-react";
 import { cx } from "../lib/format";
 
@@ -140,7 +140,7 @@ export function Menu({ label = "More actions", children, className }:
 }
 
 export function MenuItem({ icon: Icon, children, danger, href, download, target, onClick }: {
-  icon: typeof MoreHorizontal; children: ReactNode; danger?: boolean;
+  icon: ComponentType<{ className?: string }>; children: ReactNode; danger?: boolean;
   href?: string; download?: string; target?: string; onClick?: () => void;
 }) {
   const cls = cx("flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors hover:bg-hover",
