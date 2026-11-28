@@ -30,8 +30,8 @@ interface PlayerCtx {
   mode: Mode;
   autoplay: boolean;
   setAutoplay: (v: boolean) => void;
-  /** `start`: seconds to begin at (else resume where you stopped) */
-  open: (file: LibraryFile, start?: number | null) => void;
+  /** `start`: seconds to begin at (else resume where you stopped) · `play` false: load it paused */
+  open: (file: LibraryFile, start?: number | null, play?: boolean) => void;
   /** playback speed for videos / long-form audio (music always plays at 1×) */
   speed: number;
   setSpeed: (v: number) => void;
@@ -45,6 +45,13 @@ const AUTOPLAY_KEY = "tubegrab.autoplay";
 const SPEED_KEY = "tubegrab.speed";
 const readSpeed = () => { try { return Number(localStorage.getItem(SPEED_KEY)) || 1; } catch { return 1; } };
 const readAutoplay = () => { try { return localStorage.getItem(AUTOPLAY_KEY) !== "0"; } catch { return true; } };
+/** what's playing, so a reload brings it back (paused, where it was) */
+const NOW_KEY = "tubegrab.nowplaying";
+type NowPlaying = { name: string; list: string | null; pos: number };
+const readNow = (): NowPlaying | null => { try { return JSON.parse(localStorage.getItem(NOW_KEY) ?? "null"); } catch { return null; } };
+const writeNow = (n: NowPlaying | null) => {
+  try { if (n) localStorage.setItem(NOW_KEY, JSON.stringify(n)); else localStorage.removeItem(NOW_KEY); } catch { /* ok */ }
+};
 
 function createMedia(): HTMLVideoElement {
   const v = document.createElement("video");
@@ -60,7 +67,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const { progress, noteProgress, setWatched } = useStore();
   const [speed, setSpeedState] = useState(readSpeed);
   const [list, setListState] = useState<string | null>(null);
-  const { navigate } = useRouter();
+  const { navigate, path } = useRouter();
   const [el] = useState(createMedia);
   const [file, setFile] = useState<LibraryFile | null>(null);
   const [mode, setMode] = useState<Mode>("idle");
@@ -85,6 +92,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setAutoplayState(v);
     try { localStorage.setItem(AUTOPLAY_KEY, v ? "1" : "0"); } catch { /* ok */ }
   }, []);
+
+  // what was playing before a reload (used once, by the first file opened or the restore below)
+  const restored = useRef(readNow());
+  const lastNow = useRef(0);
+  const saveNow = useCallback(() => {
+    const f = live.current.file;
+    if (!f || el.ended) return;   // a finished file isn't brought back
+    lastNow.current = Date.now();
+    writeNow({ name: f.name, list: live.current.list, pos: Math.floor(el.currentTime) });
+  }, [el]);
 
   // what played before, for "previous" outside albums/playlists
   const hist = useRef<string[]>([]);
@@ -111,7 +128,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem(SPEED_KEY, String(v)); } catch { /* ok */ }
   }, [el]);
 
-  const open = useCallback((f: LibraryFile, start?: number | null) => {
+  const open = useCallback((f: LibraryFile, start?: number | null, play = true) => {
     const cur = live.current.file;
     const back = goingBack.current;
     goingBack.current = false;
@@ -128,12 +145,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     el.playbackRate = el.defaultPlaybackRate = f.section === "Music" ? 1 : live.current.speed;
     // resume where you stopped (unless finished, or nearly at the very start/end)
     const p = live.current.progress[f.name];
-    const at = start ?? (resumable(f) && p && !p.watched && p.pos > 15 && (!f.duration || p.pos < f.duration - 20) ? p.pos : null);
+    const r = restored.current;
+    restored.current = null;
+    const at = start ?? (r?.name === f.name && r.pos > 1 ? r.pos : null)
+      ?? (resumable(f) && p && !p.watched && p.pos > 15 && (!f.duration || p.pos < f.duration - 20) ? p.pos : null);
+    writeNow({ name: f.name, list: live.current.list, pos: at ?? 0 });
     if (at) el.addEventListener("loadedmetadata", () => { el.currentTime = at; }, { once: true });
     el.poster = thumbUrl(f.name, f.art, true);
     // PiP needs a video track; keep audio out of it
     el.disablePictureInPicture = f.kind === "audio";
-    el.play().catch(() => { /* autoplay blocked: user presses play */ });
+    if (play) el.play().catch(() => { /* autoplay blocked: user presses play */ });
     if ("mediaSession" in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: f.title,
@@ -154,6 +175,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     parking.current?.appendChild(el);
     setFile(null);
     changeMode("idle");
+    writeNow(null);
     if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
   }, [el, changeMode]);
 
@@ -223,14 +245,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         counted.current = f.name;
         api.played(f.name).catch(() => {});
       }
+      if (Date.now() - lastNow.current > 5_000) saveNow();
       if (!resumable(f)) return;
       if (el.duration && el.currentTime / el.duration >= 0.92 && marked.current !== f.name && !live.current.progress[f.name]?.watched) {
         marked.current = f.name;
         setWatched(f, true).catch(() => {});
       } else if (Date.now() - lastSave.current > 10_000) saveProgress();
     };
-    const onPause = () => saveProgress();
-    const onHide = () => { if (document.visibilityState === "hidden") saveProgress(true); };
+    const onPause = () => { saveProgress(); saveNow(); };
+    const onHide = () => { saveNow(); if (document.visibilityState === "hidden") saveProgress(true); };
     el.addEventListener("timeupdate", onTime);
     el.addEventListener("pause", onPause);
     document.addEventListener("visibilitychange", onHide);
@@ -241,7 +264,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onHide);
       removeEventListener("pagehide", onHide);
     };
-  }, [el, saveProgress, setWatched]);
+  }, [el, saveProgress, saveNow, setWatched]);
+
+  // after a reload: bring back what was playing, paused, in the mini player
+  // (on a Watch page, that page opens its file, and takes the position if it's the same one)
+  useEffect(() => {
+    const r = restored.current;
+    if (!r || path.startsWith("/watch/")) return;
+    fetchQuery<WatchData>(urls.watch(r.name, r.list)).then((w) => {
+      if (live.current.file || restored.current !== r) return;   // something else started meanwhile
+      setList(w.playlist ? r.list : null);
+      parking.current?.appendChild(el);
+      open(w.file, null, false);
+      changeMode("mini");
+    }).catch(() => { if (restored.current === r) { restored.current = null; writeNow(null); } });
+  }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // element events
   useEffect(() => {
@@ -251,7 +288,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       // PiP closed: "back to tab" keeps playing → mini player; the close button pauses → stop
       if (el.paused) close(); else changeMode("mini");
     };
-    const onEnded = () => { if (live.current.autoplay) next(); };
+    const onEnded = () => {
+      writeNow(null);   // finished; the next one (if any) saves itself
+      if (live.current.autoplay) next();
+    };
     el.addEventListener("enterpictureinpicture", onEnter);
     el.addEventListener("leavepictureinpicture", onLeave);
     el.addEventListener("ended", onEnded);
