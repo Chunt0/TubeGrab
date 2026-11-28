@@ -22,6 +22,7 @@ Standard library only, so it runs anywhere with Python 3.8+.
 """
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -121,9 +122,10 @@ def patient(server, path, body, out):
     while True:
         try:
             return call(server, path, body)
-        except urllib.error.URLError as e:
+        # refused, timed out, or dropped mid-answer (a deploy restarting the server)
+        except (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError) as e:
             if not down:
-                say(out, f"…  can't reach {server} ({e.reason}); trying every minute")
+                say(out, f"…  can't reach {server} ({getattr(e, 'reason', None) or e or type(e).__name__}); trying every minute")
                 down = True
             _sleep(60)
 

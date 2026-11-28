@@ -1,6 +1,7 @@
 """bin/grab, the command-line client, against the real routes (no server, no downloads)."""
 import importlib.machinery
 import importlib.util
+import http.client
 import io
 import urllib.error
 import urllib.request
@@ -203,3 +204,21 @@ def test_slow_restarts_a_job_the_server_forgot_and_waits_for_the_server(slow, se
     code, out, _ = run("--slow", "https://youtu.be/aaa")
     assert code == 0 and len(server) == 2
     assert sleeps.count(60) == 2 and out.count("can't reach") == 1
+
+
+def test_slow_waits_out_a_server_that_drops_the_connection(slow, server, monkeypatch):
+    """A deploy restarting the server mid-request closes the connection without an
+    answer (RemoteDisconnected, not URLError): wait for it like a server that's down."""
+    outcomes, sleeps = slow
+    real_call, drops = grab.call, [1]
+
+    def dropping(srv, path, body=None):
+        if path == "/api/download" and drops[0]:
+            drops[0] -= 1
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        return real_call(srv, path, body)
+
+    monkeypatch.setattr(grab, "call", dropping)
+    code, out, _ = run("--slow", "https://youtu.be/aaa")
+    assert code == 0 and len(server) == 1
+    assert sleeps.count(60) == 1 and "can't reach" in out
